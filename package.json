@@ -1,0 +1,31 @@
+{
+  "name": "festive-events-be",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Festive Events backend — media upload/list APIs with Postgres BYTEA storage",
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/dev-server.ts",
+    "build": "tsc",
+    "start": "node dist/dev-server.js",
+    "db:migrate": "tsx src/scripts/migrate.ts",
+    "db:test": "tsx src/scripts/test-db.ts",
+    "db:check": "tsx src/scripts/check-file-data.ts"
+  },
+  "dependencies": {
+    "@hono/node-server": "^1.14.3",
+    "dotenv": "^17.4.2",
+    "hono": "^4.7.10",
+    "pg": "^8.23.0",
+    "zod": "^3.25.28"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.21",
+    "@types/pg": "^8.23.1",
+    "tsx": "^4.19.4",
+    "typescript": "^5.8.3"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
