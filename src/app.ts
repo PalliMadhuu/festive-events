@@ -213,7 +213,7 @@ app.get('/media/:id/file', async (c) => {
     if (!rows[0].file_data) return c.json({ error: 'No file data stored for this record' }, 404);
 
     const buffer = byteaToBuffer(rows[0].file_data);
-    return new Response(buffer, {
+    return new Response(new Uint8Array(buffer), {
       status: 200,
       headers: {
         'Content-Type': rows[0].content_type || 'application/octet-stream',
