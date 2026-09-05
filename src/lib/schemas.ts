@@ -164,6 +164,11 @@ export const softDeleteBodySchema = z.object({
   deletedByName: z.string().optional().nullable(),
 });
 
+/** Soft-delete with id in body — reliable on Vercel (path-param UUID DELETE can 404). */
+export const softDeleteByIdBodySchema = softDeleteBodySchema.extend({
+  id: z.string().uuid(),
+});
+
 export function stripDataUrl(base64: string) {
   const comma = base64.indexOf(',');
   if (base64.startsWith('data:') && comma >= 0) {

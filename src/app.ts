@@ -4,6 +4,7 @@ import { getDb, getPool } from './lib/db.js';
 import {
   mappingBodySchema,
   softDeleteBodySchema,
+  softDeleteByIdBodySchema,
   stripDataUrl,
   uploadBodySchema,
   registerExternalBodySchema,
@@ -578,7 +579,7 @@ app.patch('/media/:id/mapping', async (c) => {
   }
 });
 
-/** Soft-delete (keeps bytes + mapping for audit) */
+/** Soft-delete (keeps bytes + mapping for audit) — path param (works locally) */
 app.delete('/media/:id', async (c) => {
   try {
     const id = c.req.param('id');
@@ -602,6 +603,49 @@ app.delete('/media/:id', async (c) => {
         deleted_by = ${parsed.data.deletedBy},
         deleted_by_name = ${parsed.data.deletedByName ?? null},
         deletion_reason = ${parsed.data.reason},
+        updated_at = NOW()
+      WHERE id::text = ${id}
+      RETURNING
+        id, purpose, kind, event_id, sub_event_id, album_id, user_id,
+        donation_id, expense_id, file_name, content_type, size_bytes,
+        duration_seconds, width, height, url, blob_pathname, thumbnail_url,
+        uploaded_by, uploaded_by_name, created_at, updated_at,
+        deleted, deleted_at, deleted_by, deleted_by_name, deletion_reason
+    `) as MediaRow[];
+
+    return c.json({ success: true, media: toMediaDto(rows[0]) });
+  } catch (error: any) {
+    return c.json({ error: error?.message || 'Failed to delete media' }, 500);
+  }
+});
+
+/**
+ * Soft-delete via POST body id — preferred for Vercel.
+ * Path-param DELETE /media/:uuid often 404s behind Vercel rewrites (same as /file).
+ */
+app.post('/media/delete', async (c) => {
+  try {
+    const parsed = softDeleteByIdBodySchema.safeParse(await c.req.json().catch(() => ({})));
+    if (!parsed.success) {
+      return c.json({ error: 'Invalid body', details: parsed.error.flatten() }, 400);
+    }
+
+    const { id, reason, deletedBy, deletedByName } = parsed.data;
+    const sql = getDb();
+    const existing = (await sql`SELECT id, deleted FROM media WHERE id::text = ${id}`) as Array<{
+      id: string;
+      deleted: boolean;
+    }>;
+    if (!existing[0]) return c.json({ error: 'Not found' }, 404);
+    if (existing[0].deleted) return c.json({ error: 'Already deleted' }, 400);
+
+    const rows = (await sql`
+      UPDATE media SET
+        deleted = TRUE,
+        deleted_at = NOW(),
+        deleted_by = ${deletedBy},
+        deleted_by_name = ${deletedByName ?? null},
+        deletion_reason = ${reason},
         updated_at = NOW()
       WHERE id::text = ${id}
       RETURNING
