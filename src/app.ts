@@ -1,12 +1,15 @@
 import { Hono } from 'hono';
 import { corsHeaders } from './lib/auth.js';
-import { getDb } from './lib/db.js';
+import { getDb, getPool } from './lib/db.js';
 import {
   mappingBodySchema,
   softDeleteBodySchema,
   stripDataUrl,
   uploadBodySchema,
   registerExternalBodySchema,
+  uploadInitBodySchema,
+  uploadChunkBodySchema,
+  uploadCompleteBodySchema,
   mediaPurposeSchema,
   mediaKindSchema,
   resolveKind,
@@ -159,6 +162,177 @@ app.post('/media/upload', async (c) => {
   }
 });
 
+const PENDING_MARKER = 'upload-pending';
+
+/** Create a pending media row for chunked Postgres upload */
+app.post('/media/upload/init', async (c) => {
+  try {
+    const parsed = uploadInitBodySchema.safeParse(await c.req.json());
+    if (!parsed.success) {
+      return c.json({ error: 'Invalid body', details: parsed.error.flatten() }, 400);
+    }
+    const data = parsed.data;
+    const kind = resolveKind(data.kind, data.contentType);
+    const sql = getDb();
+    const rows = (await sql`
+      INSERT INTO media (
+        purpose, kind, event_id, sub_event_id, album_id, user_id,
+        donation_id, expense_id,
+        file_name, content_type, size_bytes, duration_seconds, width, height,
+        file_data, url, blob_pathname,
+        uploaded_by, uploaded_by_name
+      ) VALUES (
+        ${data.purpose},
+        ${kind},
+        ${data.eventId ?? null},
+        ${data.subEventId ?? null},
+        ${data.albumId ?? null},
+        ${data.userId ?? null},
+        ${data.donationId ?? null},
+        ${data.expenseId ?? null},
+        ${data.fileName},
+        ${data.contentType},
+        ${data.size},
+        ${data.durationSeconds ?? null},
+        ${data.width ?? null},
+        ${data.height ?? null},
+        ${Buffer.alloc(0)},
+        ${''},
+        ${`${PENDING_MARKER}:${data.totalChunks}`},
+        ${data.uploadedBy},
+        ${data.uploadedByName ?? null}
+      )
+      RETURNING id
+    `) as Array<{ id: string }>;
+
+    return c.json({ success: true, id: rows[0].id, totalChunks: data.totalChunks }, 201);
+  } catch (error: any) {
+    console.error('upload init failed', error);
+    return c.json({ error: error?.message || 'Upload init failed' }, 500);
+  }
+});
+
+/** Append one base64 chunk to pending media.file_data */
+app.post('/media/upload/chunk', async (c) => {
+  try {
+    const parsed = uploadChunkBodySchema.safeParse(await c.req.json());
+    if (!parsed.success) {
+      return c.json({ error: 'Invalid body', details: parsed.error.flatten() }, 400);
+    }
+    const data = parsed.data;
+    const raw = stripDataUrl(data.base64);
+    const chunk = Buffer.from(raw, 'base64');
+    if (!chunk.length) {
+      return c.json({ error: 'Empty chunk' }, 400);
+    }
+    // Keep each request under Vercel ~4.5MB body (chunk already base64 in JSON)
+    if (chunk.length > 3.2 * 1024 * 1024) {
+      return c.json({ error: 'Chunk too large' }, 413);
+    }
+
+    const sql = getDb();
+    const existing = (await sql`
+      SELECT id, blob_pathname, size_bytes,
+             COALESCE(octet_length(file_data), 0)::int AS received
+      FROM media
+      WHERE id::text = ${data.id}
+    `) as Array<{
+      id: string;
+      blob_pathname: string | null;
+      size_bytes: number;
+      received: number;
+    }>;
+
+    if (!existing[0]) return c.json({ error: 'Not found' }, 404);
+    if (!existing[0].blob_pathname?.startsWith(PENDING_MARKER)) {
+      return c.json({ error: 'Upload is not pending' }, 400);
+    }
+
+    const nextReceived = Number(existing[0].received) + chunk.length;
+    if (nextReceived > Number(existing[0].size_bytes) + 1024) {
+      return c.json({ error: 'Chunk exceeds declared file size' }, 400);
+    }
+
+    // Append in SQL so we don't reload the full BYTEA into the function each time
+    const pool = getPool();
+    await pool.query(
+      `UPDATE media
+       SET file_data = COALESCE(file_data, '\\x'::bytea) || $1::bytea,
+           updated_at = NOW()
+       WHERE id::text = $2`,
+      [chunk, data.id]
+    );
+
+    return c.json({
+      success: true,
+      id: data.id,
+      index: data.index,
+      received: nextReceived,
+    });
+  } catch (error: any) {
+    console.error('upload chunk failed', error);
+    return c.json({ error: error?.message || 'Upload chunk failed' }, 500);
+  }
+});
+
+/** Finalize chunked upload — publish media URL and clear pending marker */
+app.post('/media/upload/complete', async (c) => {
+  try {
+    const parsed = uploadCompleteBodySchema.safeParse(await c.req.json());
+    if (!parsed.success) {
+      return c.json({ error: 'Invalid body', details: parsed.error.flatten() }, 400);
+    }
+    const { id } = parsed.data;
+    const sql = getDb();
+    const existing = (await sql`
+      SELECT
+        id, purpose, kind, event_id, sub_event_id, album_id, user_id,
+        donation_id, expense_id, file_name, content_type, size_bytes,
+        duration_seconds, width, height, url, blob_pathname, thumbnail_url,
+        uploaded_by, uploaded_by_name, created_at, updated_at,
+        deleted, deleted_at, deleted_by, deleted_by_name, deletion_reason,
+        COALESCE(octet_length(file_data), 0)::int AS received
+      FROM media
+      WHERE id::text = ${id}
+    `) as Array<MediaRow & { received: number }>;
+
+    if (!existing[0]) return c.json({ error: 'Not found' }, 404);
+    if (!existing[0].blob_pathname?.startsWith(PENDING_MARKER)) {
+      return c.json({ error: 'Upload is not pending' }, 400);
+    }
+
+    const received = Number(existing[0].received);
+    const expected = Number(existing[0].size_bytes);
+    if (received < Math.max(1, expected - 64)) {
+      return c.json(
+        { error: 'Upload incomplete', received, expected },
+        400
+      );
+    }
+
+    const url = publicFileUrl(id);
+    const rows = (await sql`
+      UPDATE media
+      SET url = ${url},
+          blob_pathname = NULL,
+          size_bytes = ${received},
+          updated_at = NOW()
+      WHERE id::text = ${id}
+      RETURNING
+        id, purpose, kind, event_id, sub_event_id, album_id, user_id,
+        donation_id, expense_id, file_name, content_type, size_bytes,
+        duration_seconds, width, height, url, blob_pathname, thumbnail_url,
+        uploaded_by, uploaded_by_name, created_at, updated_at,
+        deleted, deleted_at, deleted_by, deleted_by_name, deletion_reason
+    `) as MediaRow[];
+
+    return c.json({ success: true, media: toMediaDto(rows[0]) }, 200);
+  } catch (error: any) {
+    console.error('upload complete failed', error);
+    return c.json({ error: error?.message || 'Upload complete failed' }, 500);
+  }
+});
+
 /**
  * Register media already uploaded to object storage (Firebase etc.).
  * Avoids Vercel body limits and slow base64 for large videos.
@@ -254,6 +428,7 @@ app.get('/media', async (c) => {
         deleted, deleted_at, deleted_by, deleted_by_name, deletion_reason
       FROM media
       WHERE (${includeDeleted}::boolean OR deleted = FALSE)
+        AND (blob_pathname IS NULL OR blob_pathname NOT LIKE 'upload-pending%')
         AND (${eventId}::text IS NULL OR event_id = ${eventId})
         AND (${purpose}::text IS NULL OR purpose::text = ${purpose})
         AND (${kind}::text IS NULL OR kind::text = ${kind})
