@@ -32,6 +32,45 @@ app.get('/health', (c) =>
   })
 );
 
+/** Stream file bytes by query id — reliable on Vercel (path-param UUID routes can 404). */
+app.get('/media/content', async (c) => {
+  try {
+    const id = String(c.req.query('id') || '').trim();
+    if (!id) return c.json({ error: 'id query param is required' }, 400);
+
+    const sql = getDb();
+    const rows = (await sql`
+      SELECT file_data, content_type, file_name, deleted
+      FROM media
+      WHERE id::text = ${id}
+    `) as Array<{
+      file_data: unknown;
+      content_type: string;
+      file_name: string;
+      deleted: boolean;
+    }>;
+
+    if (!rows[0]) return c.json({ error: 'Not found', id }, 404);
+    if (rows[0].deleted) return c.json({ error: 'Media was deleted' }, 410);
+    if (!rows[0].file_data) return c.json({ error: 'No file data stored for this record' }, 404);
+
+    const buffer = byteaToBuffer(rows[0].file_data);
+    return new Response(new Uint8Array(buffer), {
+      status: 200,
+      headers: {
+        'Content-Type': rows[0].content_type || 'application/octet-stream',
+        'Content-Length': String(buffer.length),
+        'Content-Disposition': `inline; filename="${rows[0].file_name.replace(/"/g, '')}"`,
+        'Cache-Control': 'public, max-age=3600',
+        'Access-Control-Allow-Origin': '*',
+      },
+    });
+  } catch (error: any) {
+    console.error('file stream failed', error);
+    return c.json({ error: error?.message || 'Failed to stream file' }, 500);
+  }
+});
+
 /** Upload photo/video — bytes stored in Postgres `media.file_data` */
 app.post('/media/upload', async (c) => {
   try {
@@ -99,7 +138,7 @@ app.post('/media/upload', async (c) => {
     const row = rows[0];
     // Persist convenient file URL path (optional absolute via API_PUBLIC_URL)
     const url = publicFileUrl(row.id);
-    await sql`UPDATE media SET url = ${url} WHERE id = ${row.id}::uuid`;
+    await sql`UPDATE media SET url = ${url} WHERE id::text = ${row.id}`;
     row.url = url;
 
     return c.json({ success: true, media: toMediaDto(row) }, 201);
@@ -183,7 +222,7 @@ app.get('/media/:id', async (c) => {
         uploaded_by, uploaded_by_name, created_at, updated_at,
         deleted, deleted_at, deleted_by, deleted_by_name, deletion_reason
       FROM media
-      WHERE id = ${id}::uuid
+      WHERE id::text = ${id}
     `) as MediaRow[];
     if (!rows[0]) return c.json({ error: 'Not found' }, 404);
     return c.json({ success: true, media: toMediaDto(rows[0]) });
@@ -200,7 +239,7 @@ app.get('/media/:id/file', async (c) => {
     const rows = (await sql`
       SELECT file_data, content_type, file_name, deleted
       FROM media
-      WHERE id = ${id}::uuid
+      WHERE id::text = ${id}
     `) as Array<{
       file_data: unknown;
       content_type: string;
@@ -245,7 +284,7 @@ app.patch('/media/:id/mapping', async (c) => {
         duration_seconds, width, height, url, blob_pathname, thumbnail_url,
         uploaded_by, uploaded_by_name, created_at, updated_at,
         deleted, deleted_at, deleted_by, deleted_by_name, deletion_reason
-      FROM media WHERE id = ${id}::uuid
+      FROM media WHERE id::text = ${id}
     `) as MediaRow[];
     if (!existing[0]) return c.json({ error: 'Not found' }, 404);
     if (existing[0].deleted) return c.json({ error: 'Cannot remap a deleted media item' }, 400);
@@ -271,7 +310,7 @@ app.patch('/media/:id/mapping', async (c) => {
         donation_id = ${next.donationId},
         expense_id = ${next.expenseId},
         updated_at = NOW()
-      WHERE id = ${id}::uuid
+      WHERE id::text = ${id}
       RETURNING
         id, purpose, kind, event_id, sub_event_id, album_id, user_id,
         donation_id, expense_id, file_name, content_type, size_bytes,
@@ -296,7 +335,7 @@ app.delete('/media/:id', async (c) => {
     }
 
     const sql = getDb();
-    const existing = (await sql`SELECT id, deleted FROM media WHERE id = ${id}::uuid`) as Array<{
+    const existing = (await sql`SELECT id, deleted FROM media WHERE id::text = ${id}`) as Array<{
       id: string;
       deleted: boolean;
     }>;
@@ -311,7 +350,7 @@ app.delete('/media/:id', async (c) => {
         deleted_by_name = ${parsed.data.deletedByName ?? null},
         deletion_reason = ${parsed.data.reason},
         updated_at = NOW()
-      WHERE id = ${id}::uuid
+      WHERE id::text = ${id}
       RETURNING
         id, purpose, kind, event_id, sub_event_id, album_id, user_id,
         donation_id, expense_id, file_name, content_type, size_bytes,
@@ -331,9 +370,9 @@ app.delete('/media/:id/hard', async (c) => {
   try {
     const id = c.req.param('id');
     const sql = getDb();
-    const existing = (await sql`SELECT id FROM media WHERE id = ${id}::uuid`) as Array<{ id: string }>;
+    const existing = (await sql`SELECT id FROM media WHERE id::text = ${id}`) as Array<{ id: string }>;
     if (!existing[0]) return c.json({ error: 'Not found' }, 404);
-    await sql`DELETE FROM media WHERE id = ${id}::uuid`;
+    await sql`DELETE FROM media WHERE id::text = ${id}`;
     return c.json({ success: true });
   } catch (error: any) {
     return c.json({ error: error?.message || 'Failed to hard-delete media' }, 500);

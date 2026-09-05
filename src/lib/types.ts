@@ -72,9 +72,24 @@ export const MEDIA_META_COLUMNS = `
 `;
 
 export function publicFileUrl(id: string): string {
-  const base = (process.env.API_PUBLIC_URL || '').replace(/\/$/, '');
-  const path = `/api/media/${id}/file`;
-  return base ? `${base}${path}` : path;
+  const path = `/api/media/content?id=${encodeURIComponent(id)}`;
+  let base = (process.env.API_PUBLIC_URL || '').replace(/\/$/, '');
+
+  // Never expose localhost / LAN IPs to mobile clients — they can't load those URLs.
+  const bad =
+    !base ||
+    /localhost|127\.0\.0\.1/i.test(base) ||
+    /^https?:\/\/(10\.|192\.168\.|172\.(1[6-9]|2\d|3[0-1])\.|169\.254\.)/i.test(base);
+
+  if (bad) {
+    if (process.env.VERCEL_URL) {
+      base = `https://${process.env.VERCEL_URL.replace(/^https?:\/\//, '')}`;
+    } else {
+      base = 'https://festive-events-phi.vercel.app';
+    }
+  }
+
+  return `${base}${path}`;
 }
 
 export function toMediaDto(row: MediaRow): MediaDto {
