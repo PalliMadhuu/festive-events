@@ -6,6 +6,7 @@ import {
   softDeleteBodySchema,
   stripDataUrl,
   uploadBodySchema,
+  registerExternalBodySchema,
   mediaPurposeSchema,
   mediaKindSchema,
   resolveKind,
@@ -40,7 +41,7 @@ app.get('/media/content', async (c) => {
 
     const sql = getDb();
     const rows = (await sql`
-      SELECT file_data, content_type, file_name, deleted
+      SELECT file_data, content_type, file_name, deleted, url
       FROM media
       WHERE id::text = ${id}
     `) as Array<{
@@ -48,10 +49,20 @@ app.get('/media/content', async (c) => {
       content_type: string;
       file_name: string;
       deleted: boolean;
+      url: string | null;
     }>;
 
     if (!rows[0]) return c.json({ error: 'Not found', id }, 404);
     if (rows[0].deleted) return c.json({ error: 'Media was deleted' }, 410);
+
+    const external = (rows[0].url || '').trim();
+    if (
+      !rows[0].file_data &&
+      /^https:\/\//i.test(external) &&
+      !external.includes('/api/media/')
+    ) {
+      return c.redirect(external, 302);
+    }
     if (!rows[0].file_data) return c.json({ error: 'No file data stored for this record' }, 404);
 
     const buffer = byteaToBuffer(rows[0].file_data);
@@ -148,6 +159,63 @@ app.post('/media/upload', async (c) => {
   }
 });
 
+/**
+ * Register media already uploaded to object storage (Firebase etc.).
+ * Avoids Vercel body limits and slow base64 for large videos.
+ */
+app.post('/media/register', async (c) => {
+  try {
+    const json = await c.req.json();
+    const parsed = registerExternalBodySchema.safeParse(json);
+    if (!parsed.success) {
+      return c.json({ error: 'Invalid body', details: parsed.error.flatten() }, 400);
+    }
+
+    const data = parsed.data;
+    const kind = resolveKind(data.kind, data.contentType);
+    const sql = getDb();
+    const rows = (await sql`
+      INSERT INTO media (
+        purpose, kind, event_id, sub_event_id, album_id, user_id,
+        donation_id, expense_id,
+        file_name, content_type, size_bytes, duration_seconds, width, height,
+        url, thumbnail_url,
+        uploaded_by, uploaded_by_name
+      ) VALUES (
+        ${data.purpose},
+        ${kind},
+        ${data.eventId ?? null},
+        ${data.subEventId ?? null},
+        ${data.albumId ?? null},
+        ${data.userId ?? null},
+        ${data.donationId ?? null},
+        ${data.expenseId ?? null},
+        ${data.fileName},
+        ${data.contentType},
+        ${data.size ?? 0},
+        ${data.durationSeconds ?? null},
+        ${data.width ?? null},
+        ${data.height ?? null},
+        ${data.url},
+        ${data.thumbnailUrl ?? null},
+        ${data.uploadedBy},
+        ${data.uploadedByName ?? null}
+      )
+      RETURNING
+        id, purpose, kind, event_id, sub_event_id, album_id, user_id,
+        donation_id, expense_id, file_name, content_type, size_bytes,
+        duration_seconds, width, height, url, blob_pathname, thumbnail_url,
+        uploaded_by, uploaded_by_name, created_at, updated_at,
+        deleted, deleted_at, deleted_by, deleted_by_name, deletion_reason
+    `) as MediaRow[];
+
+    return c.json({ success: true, media: toMediaDto(rows[0]) }, 201);
+  } catch (error: any) {
+    console.error('register failed', error);
+    return c.json({ error: error?.message || 'Register failed' }, 500);
+  }
+});
+
 /** List media metadata by mapping filters (no file bytes in response) */
 app.get('/media', async (c) => {
   try {
@@ -237,7 +305,7 @@ app.get('/media/:id/file', async (c) => {
     const id = c.req.param('id');
     const sql = getDb();
     const rows = (await sql`
-      SELECT file_data, content_type, file_name, deleted
+      SELECT file_data, content_type, file_name, deleted, url
       FROM media
       WHERE id::text = ${id}
     `) as Array<{
@@ -245,10 +313,20 @@ app.get('/media/:id/file', async (c) => {
       content_type: string;
       file_name: string;
       deleted: boolean;
+      url: string | null;
     }>;
 
     if (!rows[0]) return c.json({ error: 'Not found' }, 404);
     if (rows[0].deleted) return c.json({ error: 'Media was deleted' }, 410);
+
+    const external = (rows[0].url || '').trim();
+    if (
+      !rows[0].file_data &&
+      /^https:\/\//i.test(external) &&
+      !external.includes('/api/media/')
+    ) {
+      return c.redirect(external, 302);
+    }
     if (!rows[0].file_data) return c.json({ error: 'No file data stored for this record' }, 404);
 
     const buffer = byteaToBuffer(rows[0].file_data);

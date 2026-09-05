@@ -92,6 +92,19 @@ export function publicFileUrl(id: string): string {
   return `${base}${path}`;
 }
 
+/** Prefer external https URLs (Firebase Storage); otherwise stream via API. */
+export function resolveMediaPublicUrl(row: MediaRow): string {
+  const stored = (row.url || '').trim();
+  if (
+    /^https:\/\//i.test(stored) &&
+    !stored.includes('/api/media/content') &&
+    !/\/api\/media\/[^/]+\/file/.test(stored)
+  ) {
+    return stored;
+  }
+  return publicFileUrl(row.id);
+}
+
 export function toMediaDto(row: MediaRow): MediaDto {
   return {
     id: row.id,
@@ -109,7 +122,7 @@ export function toMediaDto(row: MediaRow): MediaDto {
     durationSeconds: row.duration_seconds != null ? Number(row.duration_seconds) : null,
     width: row.width,
     height: row.height,
-    url: publicFileUrl(row.id),
+    url: resolveMediaPublicUrl(row),
     thumbnailUrl: row.thumbnail_url,
     uploadedBy: row.uploaded_by,
     uploadedByName: row.uploaded_by_name,

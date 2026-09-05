@@ -41,6 +41,54 @@ export const uploadBodySchema = z
     }
   });
 
+/** Register media that was uploaded elsewhere (e.g. Firebase Storage) — no file bytes. */
+export const registerExternalBodySchema = z
+  .object({
+    purpose: mediaPurposeSchema,
+    kind: mediaKindSchema.optional().default('photo'),
+    eventId: z.string().min(1).optional().nullable(),
+    subEventId: z.string().min(1).optional().nullable(),
+    albumId: z.string().min(1).optional().nullable(),
+    userId: z.string().min(1).optional().nullable(),
+    donationId: z.string().min(1).optional().nullable(),
+    expenseId: z.string().min(1).optional().nullable(),
+    uploadedBy: z.string().min(1),
+    uploadedByName: z.string().optional().nullable(),
+    fileName: z.string().min(1),
+    contentType: z.string().min(1).default('video/mp4'),
+    size: z.number().int().nonnegative().optional().default(0),
+    durationSeconds: z.number().positive().optional().nullable(),
+    width: z.number().int().positive().optional().nullable(),
+    height: z.number().int().positive().optional().nullable(),
+    /** Absolute HTTPS URL to the file (Firebase Storage, CDN, etc.) */
+    url: z.string().url(),
+    thumbnailUrl: z.string().url().optional().nullable(),
+  })
+  .superRefine((value, ctx) => {
+    if (value.purpose === 'avatar') {
+      if (!value.userId) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: 'userId is required for avatar uploads',
+          path: ['userId'],
+        });
+      }
+    } else if (!value.eventId) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'eventId is required for this purpose',
+        path: ['eventId'],
+      });
+    }
+    if (!/^https:\/\//i.test(value.url)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'url must be https',
+        path: ['url'],
+      });
+    }
+  });
+
 export const mappingBodySchema = z.object({
   eventId: z.string().min(1).optional().nullable(),
   subEventId: z.string().min(1).optional().nullable(),
