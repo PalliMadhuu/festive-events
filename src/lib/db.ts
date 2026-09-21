@@ -4,6 +4,31 @@ const { Pool } = pg;
 
 let pool: pg.Pool | null = null;
 
+export type Sql = ((strings: TemplateStringsArray, ...values: unknown[]) => Promise<any[]>) & {
+  query: (text: string, params?: unknown[]) => Promise<any[]>;
+};
+
+function makeSql(queryable: { query: (text: string, params?: unknown[]) => Promise<{ rows: any[] }> }): Sql {
+  const tagged = async (strings: TemplateStringsArray, ...values: unknown[]) => {
+    let text = '';
+    const params: unknown[] = [];
+    strings.forEach((part, i) => {
+      text += part;
+      if (i < values.length) {
+        params.push(values[i]);
+        text += `$${params.length}`;
+      }
+    });
+    const result = await queryable.query(text, params);
+    return result.rows;
+  };
+  (tagged as Sql).query = async (text: string, params: unknown[] = []) => {
+    const result = await queryable.query(text, params);
+    return result.rows;
+  };
+  return tagged as Sql;
+}
+
 export function getPool() {
   const url = process.env.DATABASE_URL;
   if (!url) {
@@ -25,21 +50,20 @@ export function getPool() {
  * Usage: await sql`SELECT * FROM media WHERE id = ${id}`
  */
 export function getDb() {
-  const pool = getPool();
+  return makeSql(getPool());
+}
 
-  async function sql(strings: TemplateStringsArray, ...values: unknown[]) {
-    let text = '';
-    const params: unknown[] = [];
-    strings.forEach((part, i) => {
-      text += part;
-      if (i < values.length) {
-        params.push(values[i]);
-        text += `$${params.length}`;
-      }
-    });
-    const result = await pool.query(text, params);
-    return result.rows;
+export async function withTransaction<T>(fn: (sql: Sql) => Promise<T>): Promise<T> {
+  const client = await getPool().connect();
+  try {
+    await client.query('BEGIN');
+    const result = await fn(makeSql(client));
+    await client.query('COMMIT');
+    return result;
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
   }
-
-  return sql;
 }

@@ -10,12 +10,16 @@
     "start": "node dist/dev-server.js",
     "db:migrate": "tsx src/scripts/migrate.ts",
     "db:test": "tsx src/scripts/test-db.ts",
-    "db:check": "tsx src/scripts/check-file-data.ts"
+    "db:check": "tsx src/scripts/check-file-data.ts",
+    "db:apply": "tsx src/scripts/apply-sql.ts",
+    "db:migrate-firestore": "tsx src/scripts/migrate-firestore.ts"
   },
   "dependencies": {
     "@hono/node-server": "^1.14.3",
     "dotenv": "^17.4.2",
+    "firebase": "^12.19.0",
     "hono": "^4.7.10",
+    "jose": "^6.2.12",
     "pg": "^8.23.0",
     "zod": "^3.25.28"
   },

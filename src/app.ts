@@ -1,6 +1,7 @@
 import { Hono } from 'hono';
 import { corsHeaders } from './lib/auth.js';
 import { getDb, getPool } from './lib/db.js';
+import { createHash } from 'node:crypto';
 import {
   mappingBodySchema,
   softDeleteBodySchema,
@@ -16,6 +17,7 @@ import {
   resolveKind,
 } from './lib/schemas.js';
 import { byteaToBuffer, MediaRow, publicFileUrl, toMediaDto } from './lib/types.js';
+import { dataRoutes } from './routes/data.js';
 
 const app = new Hono().basePath('/api');
 
@@ -675,6 +677,87 @@ app.delete('/media/:id/hard', async (c) => {
     return c.json({ error: error?.message || 'Failed to hard-delete media' }, 500);
   }
 });
+
+function hashOtp(otp: string) {
+  return createHash('sha256').update(otp.trim()).digest('hex');
+}
+
+app.get('/auth/email-status', async (c) => {
+  const email = String(c.req.query('email') || '')
+    .trim()
+    .toLowerCase();
+  if (!email) return c.json({ error: 'email is required' }, 400);
+  const rows = await getDb()`
+    SELECT uid, display_name FROM utsav_seva.users
+    WHERE lower(email) = ${email} AND removed = FALSE
+    LIMIT 1
+  `;
+  if (!rows[0]) return c.json({ taken: false, exists: false });
+  return c.json({ taken: true, exists: true, uid: rows[0].uid, displayName: rows[0].display_name || '' });
+});
+
+app.post('/auth/registration-otp', async (c) => {
+  try {
+    const body = await c.req.json();
+    const email = String(body.email || '')
+      .trim()
+      .toLowerCase();
+    const displayName = String(body.displayName || '').trim();
+    const otp = String(body.otp || '').trim();
+    if (!email || !otp) return c.json({ error: 'email and otp are required' }, 400);
+    const taken = await getDb()`
+      SELECT uid FROM utsav_seva.users WHERE lower(email) = ${email} AND removed = FALSE LIMIT 1
+    `;
+    if (taken[0]) return c.json({ error: 'An account already exists with this email. Please sign in instead.' }, 409);
+    await getDb()`
+      INSERT INTO public.registration_otps (email, display_name, otp_hash, expires_at, attempts, verified, updated_at)
+      VALUES (${email}, ${displayName || null}, ${hashOtp(otp)}, NOW() + INTERVAL '10 minutes', 0, FALSE, NOW())
+      ON CONFLICT (email) DO UPDATE SET
+        display_name = EXCLUDED.display_name,
+        otp_hash = EXCLUDED.otp_hash,
+        expires_at = EXCLUDED.expires_at,
+        attempts = 0,
+        verified = FALSE,
+        updated_at = NOW()
+    `;
+    return c.json({ success: true });
+  } catch (error: any) {
+    return c.json({ error: error?.message || 'Failed to store OTP' }, 500);
+  }
+});
+
+app.post('/auth/verify-registration-otp', async (c) => {
+  try {
+    const body = await c.req.json();
+    const email = String(body.email || '')
+      .trim()
+      .toLowerCase();
+    const otp = String(body.otp || '').trim();
+    if (!email || !otp) return c.json({ error: 'email and otp are required' }, 400);
+    const rows = await getDb()`SELECT * FROM public.registration_otps WHERE email = ${email} LIMIT 1`;
+    if (!rows[0]) return c.json({ error: 'Request a new verification code first.' }, 400);
+    if (Number(rows[0].attempts || 0) >= 5) {
+      return c.json({ error: 'Too many attempts. Request a new code.' }, 400);
+    }
+    if (new Date(rows[0].expires_at).getTime() < Date.now()) {
+      return c.json({ error: 'Code expired. Request a new one.' }, 400);
+    }
+    if (String(rows[0].otp_hash) !== hashOtp(otp)) {
+      await getDb()`
+        UPDATE public.registration_otps SET attempts = attempts + 1, updated_at = NOW() WHERE email = ${email}
+      `;
+      return c.json({ error: 'Incorrect verification code.' }, 400);
+    }
+    await getDb()`
+      UPDATE public.registration_otps SET verified = TRUE, updated_at = NOW() WHERE email = ${email}
+    `;
+    return c.json({ success: true });
+  } catch (error: any) {
+    return c.json({ error: error?.message || 'Failed to verify OTP' }, 500);
+  }
+});
+
+app.route('/', dataRoutes);
 
 app.notFound((c) => c.json({ error: 'Not found' }, 404));
 

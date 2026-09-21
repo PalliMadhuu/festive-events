@@ -1,10 +1,10 @@
 # Festive Events Backend (`festive-events-be-repo`)
 
-Standalone deployable API for **photos & videos**.
+API for **app data + photos/videos**, stored in PostgreSQL.
 
-- Files stored in **PostgreSQL** (`media.file_data` BYTEA)
-- Mapped by `eventId` / `subEventId` / `albumId` / `userId` / `purpose`
-- No Firebase Storage, no Vercel Blob, no API key
+- Files: `media.file_data` BYTEA
+- App records: schema `utsav_seva` (users, events, donations, expenses, …)
+- Login remains **Firebase email/password**. Google sign-in is not part of this API.
 
 ## Quick start
 
@@ -24,6 +24,7 @@ API: `http://localhost:3001/api/health`
 | Variable | Required | Example |
 |----------|----------|---------|
 | `DATABASE_URL` | yes | `postgresql://user:pass@host:5432/B2B_POC` |
+| `FIREBASE_PROJECT_ID` | no | `festiveevents-e84f8` (verifies email/password ID tokens) |
 | `API_PUBLIC_URL` | no | `https://your-host.com` |
 | `CORS_ORIGIN` | no | `*` |
 | `PORT` | no | `3001` |
@@ -35,13 +36,15 @@ API: `http://localhost:3001/api/health`
 | File | When |
 |------|------|
 | `migrations/000_rollback_media.sql` | Drop old tables |
-| `schema.sql` | Create / refresh full schema |
+| `migrations/005_app_tables.sql` | App data tables (`utsav_seva`) + copy Firestore with `npm run db:migrate-firestore` |
 
 ## Endpoints
 
 | Method | Path | Description |
 |--------|------|-------------|
 | GET | `/api/health` | Health check |
+| GET/POST/PATCH/DELETE | `/api/streets` `/api/festivals` `/api/events` … | App data (Firebase ID token required) |
+| POST | `/api/auth/registration-otp` | Store registration OTP |
 | POST | `/api/media/upload` | Upload photo/video (base64) + mapping |
 | GET | `/api/media?eventId=&purpose=` | List by IDs |
 | GET | `/api/media/:id` | Metadata |
