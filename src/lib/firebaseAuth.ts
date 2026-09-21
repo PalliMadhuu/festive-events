@@ -1,6 +1,6 @@
 import * as jose from 'jose';
 
-const PROJECT_ID = process.env.FIREBASE_PROJECT_ID || 'festiveevents-e84f8';
+const PROJECT_ID = (process.env.FIREBASE_PROJECT_ID || '').trim() || 'festiveevents-e84f8';
 
 const JWKS = jose.createRemoteJWKSet(
   new URL('https://www.googleapis.com/service_accounts/v1/jwk/securetoken@system.gserviceaccount.com')
@@ -23,6 +23,7 @@ export async function verifyFirebaseToken(authHeader: string | undefined): Promi
   const { payload } = await jose.jwtVerify(token, JWKS, {
     issuer: `https://securetoken.google.com/${PROJECT_ID}`,
     audience: PROJECT_ID,
+    clockTolerance: 120,
   });
 
   const uid = String(payload.user_id || payload.sub || '');

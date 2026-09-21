@@ -978,7 +978,10 @@ dataRoutes.get('/events/:eventId/donations', async (c) => {
   const eventId = c.req.param('eventId');
   const result = await getDb()`
     SELECT d.*,
-      COALESCE(ARRAY(SELECT l.user_id FROM utsav_seva.donation_likes l WHERE l.donation_id = d.id), '{}') AS liked_by
+      COALESCE(
+        (SELECT ARRAY_AGG(l.user_id) FROM utsav_seva.donation_likes l WHERE l.donation_id = d.id),
+        ARRAY[]::text[]
+      ) AS liked_by
     FROM utsav_seva.donations d
     WHERE d.event_id = ${eventId}
     ORDER BY d.created_at DESC
@@ -1037,7 +1040,10 @@ dataRoutes.get('/events/:eventId/street-donations', async (c) => {
   const eventId = c.req.param('eventId');
   const result = await getDb()`
     SELECT d.*,
-      COALESCE(ARRAY(SELECT l.user_id FROM utsav_seva.street_donation_likes l WHERE l.donation_id = d.id), '{}') AS liked_by
+      COALESCE(
+        (SELECT ARRAY_AGG(l.user_id) FROM utsav_seva.street_donation_likes l WHERE l.donation_id = d.id),
+        ARRAY[]::text[]
+      ) AS liked_by
     FROM utsav_seva.street_donations d
     WHERE d.event_id = ${eventId}
     ORDER BY d.created_at DESC

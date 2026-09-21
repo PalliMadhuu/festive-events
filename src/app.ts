@@ -30,14 +30,22 @@ app.use('*', async (c, next) => {
   Object.entries(headers).forEach(([key, value]) => c.header(key, value));
 });
 
-app.get('/health', (c) =>
-  c.json({
+app.get('/health', async (c) => {
+  let appTables = false;
+  try {
+    const rows = await getDb()`SELECT to_regclass('utsav_seva.events') AS rel`;
+    appTables = !!rows[0]?.rel;
+  } catch {
+    appTables = false;
+  }
+  return c.json({
     ok: true,
     service: 'festive-events-api',
     storage: 'postgres-bytea',
+    appTables,
     time: new Date().toISOString(),
-  })
-);
+  });
+});
 
 /** Stream file bytes by query id — reliable on Vercel (path-param UUID routes can 404). */
 app.get('/media/content', async (c) => {
