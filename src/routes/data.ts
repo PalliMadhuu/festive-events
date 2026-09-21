@@ -79,6 +79,266 @@ function canManageEvent(actor: Actor, event: any) {
   return ids.includes(actor.uid);
 }
 
+function assertCanWriteUser(actor: Actor, uid: string) {
+  if (actor.uid !== uid && actor.role !== 'superAdmin') throw httpError('Forbidden', 403);
+}
+
+async function upsertUserRow(sql: Sql, actor: Actor, uid: string, body: any) {
+  assertCanWriteUser(actor, uid);
+  const email = String(body.email || actor.email || '').trim().toLowerCase();
+  const displayName = String(body.displayName || '').trim();
+  const role =
+    isSuperAdminEmail(email) || body.role === 'superAdmin' ? 'superAdmin' : body.role === 'user' ? 'user' : null;
+  const existing = await sql`SELECT * FROM utsav_seva.users WHERE uid = ${uid} LIMIT 1`;
+  if (existing[0]?.removed) return toUser(existing[0]);
+  const nextRole = isSuperAdminEmail(email) || isSuperAdminEmail(existing[0]?.email)
+    ? 'superAdmin'
+    : role === 'superAdmin'
+      ? 'superAdmin'
+      : role === 'user' && actor.role === 'superAdmin' && !isSuperAdminEmail(existing[0]?.email)
+        ? 'user'
+        : existing[0]?.role || (isSuperAdminEmail(email) ? 'superAdmin' : 'user');
+  const rows = await sql`
+    INSERT INTO utsav_seva.users (
+      uid, display_name, email, phone_number, photo_url, street_id, street_name, role, fcm_token, updated_at
+    ) VALUES (
+      ${uid},
+      ${displayName || existing[0]?.display_name || ''},
+      ${email || existing[0]?.email || ''},
+      ${body.phoneNumber ?? existing[0]?.phone_number ?? null},
+      ${body.photoURL ?? existing[0]?.photo_url ?? null},
+      ${body.streetId ?? existing[0]?.street_id ?? null},
+      ${body.streetName ?? existing[0]?.street_name ?? null},
+      ${nextRole},
+      ${body.fcmToken ?? existing[0]?.fcm_token ?? null},
+      NOW()
+    )
+    ON CONFLICT (uid) DO UPDATE SET
+      display_name = COALESCE(EXCLUDED.display_name, utsav_seva.users.display_name),
+      email = COALESCE(NULLIF(EXCLUDED.email, ''), utsav_seva.users.email),
+      phone_number = COALESCE(EXCLUDED.phone_number, utsav_seva.users.phone_number),
+      photo_url = COALESCE(EXCLUDED.photo_url, utsav_seva.users.photo_url),
+      street_id = COALESCE(EXCLUDED.street_id, utsav_seva.users.street_id),
+      street_name = COALESCE(EXCLUDED.street_name, utsav_seva.users.street_name),
+      role = EXCLUDED.role,
+      fcm_token = COALESCE(EXCLUDED.fcm_token, utsav_seva.users.fcm_token),
+      updated_at = NOW()
+    RETURNING *
+  `;
+  return toUser(rows[0]);
+}
+
+async function patchUserRow(sql: Sql, actor: Actor, uid: string, body: any) {
+  assertCanWriteUser(actor, uid);
+  const existing = await sql`SELECT * FROM utsav_seva.users WHERE uid = ${uid} LIMIT 1`;
+  if (!existing[0]) {
+    return upsertUserRow(sql, actor, uid, { ...body, email: actor.email, displayName: actor.displayName });
+  }
+  let role = existing[0].role;
+  if (actor.role === 'superAdmin' && (body.role === 'user' || body.role === 'superAdmin')) {
+    role = isSuperAdminEmail(existing[0].email) ? 'superAdmin' : body.role;
+  }
+  const rows = await sql`
+    UPDATE utsav_seva.users SET
+      display_name = ${body.displayName !== undefined ? String(body.displayName) : existing[0].display_name},
+      phone_number = ${body.phoneNumber !== undefined ? body.phoneNumber : existing[0].phone_number},
+      photo_url = ${body.photoURL !== undefined ? body.photoURL : existing[0].photo_url},
+      street_id = ${body.streetId !== undefined ? body.streetId : existing[0].street_id},
+      street_name = ${body.streetName !== undefined ? body.streetName : existing[0].street_name},
+      role = ${role},
+      fcm_token = ${body.fcmToken !== undefined ? body.fcmToken : existing[0].fcm_token},
+      updated_at = NOW()
+    WHERE uid = ${uid}
+    RETURNING *
+  `;
+  return toUser(rows[0]);
+}
+
+async function syncUserPhoto(sql: Sql, actor: Actor, uid: string, photoURL: string) {
+  assertCanWriteUser(actor, uid);
+  if (!photoURL) throw httpError('photoURL is required', 400);
+  await sql`UPDATE utsav_seva.users SET photo_url = ${photoURL}, updated_at = NOW() WHERE uid = ${uid}`;
+  await sql`UPDATE utsav_seva.event_members SET photo_url = ${photoURL} WHERE user_id = ${uid}`;
+}
+
+async function createExpenseRecord(actor: Actor, eventId: string, body: any) {
+  const amount = num(body.amount);
+  const created = await withTransaction(async (sql) => {
+    const rows = await sql`
+      INSERT INTO utsav_seva.expenses (
+        event_id, title, amount, category, other_category, description, date, sub_event_id,
+        receipt_urls, uploaded_by, uploaded_by_name
+      ) VALUES (
+        ${eventId},
+        ${String(body.title || '').trim()},
+        ${amount},
+        ${body.category ?? null},
+        ${body.otherCategory ?? null},
+        ${body.description ?? null},
+        ${body.date || new Date().toISOString()},
+        ${body.subEventId ?? null},
+        ${Array.isArray(body.receiptUrls) ? body.receiptUrls : []},
+        ${body.uploadedBy || actor.uid},
+        ${body.uploadedByName || actor.displayName || ''}
+      )
+      RETURNING *
+    `;
+    if (amount) {
+      await sql`
+        UPDATE utsav_seva.events
+        SET total_expenses = total_expenses + ${amount}, updated_at = NOW()
+        WHERE id = ${eventId}
+      `;
+    }
+    return rows[0];
+  });
+  return toExpense(created);
+}
+
+async function createDonationRecord(actor: Actor, eventId: string, body: any, kind: 'festival' | 'street') {
+  const amount = num(body.amount);
+  const status = body.status === 'pending' ? 'pending' : 'given';
+  const created = await withTransaction(async (sql) => {
+    const rows =
+      kind === 'festival'
+        ? await sql`
+            INSERT INTO utsav_seva.donations (
+              event_id, donor_name, amount, note, photo_url, status, date, uploaded_by, uploaded_by_name
+            ) VALUES (
+              ${eventId},
+              ${String(body.donorName || '').trim()},
+              ${amount},
+              ${body.note || ''},
+              ${body.photoUrl || null},
+              ${status},
+              ${new Date().toISOString()},
+              ${body.uploadedBy || actor.uid},
+              ${body.uploadedByName || actor.displayName || ''}
+            )
+            RETURNING *
+          `
+        : await sql`
+            INSERT INTO utsav_seva.street_donations (
+              event_id, donor_name, amount, note, photo_url, status, date, uploaded_by, uploaded_by_name
+            ) VALUES (
+              ${eventId},
+              ${String(body.donorName || '').trim()},
+              ${amount},
+              ${body.note || ''},
+              ${body.photoUrl || null},
+              ${status},
+              ${new Date().toISOString()},
+              ${body.uploadedBy || actor.uid},
+              ${body.uploadedByName || actor.displayName || ''}
+            )
+            RETURNING *
+          `;
+    if (status === 'given' && amount) {
+      if (kind === 'festival') {
+        await sql`
+          UPDATE utsav_seva.events
+          SET total_donations = total_donations + ${amount}, updated_at = NOW()
+          WHERE id = ${eventId}
+        `;
+      } else {
+        await sql`
+          UPDATE utsav_seva.events
+          SET total_street_donations = total_street_donations + ${amount}, updated_at = NOW()
+          WHERE id = ${eventId}
+        `;
+      }
+    }
+    return { ...rows[0], liked_by: [] };
+  });
+  return toDonation(created);
+}
+
+async function createStreetRecord(actor: Actor, body: any) {
+  requireSuper(actor);
+  const name = String(body.name || '').trim();
+  if (!name) throw httpError('Street name is required', 400);
+  const rows = await getDb()`
+    INSERT INTO utsav_seva.streets (name, description, created_by)
+    VALUES (${name}, ${String(body.description || '').trim()}, ${actor.uid})
+    RETURNING *
+  `;
+  return toStreet(rows[0]);
+}
+
+async function createEventRecord(actor: Actor, body: any) {
+  const streetId = String(body.streetId || '').trim();
+  const streetName = String(body.streetName || '').trim();
+  const festivalName = String(body.festivalName || '').trim();
+  const year = Number(body.year);
+  const eventName = String(body.eventName || '').trim();
+  const description = String(body.description || '').trim();
+  if (!streetId || !streetName || !festivalName || !eventName || !description || !Number.isFinite(year)) {
+    throw httpError('Missing required fields', 400);
+  }
+  try {
+    const created = await withTransaction(async (sql) => {
+      const existing = await sql`
+        SELECT id FROM utsav_seva.events WHERE street_id = ${streetId} AND year = ${year}
+      `;
+      if (existing.length > 0) {
+        throw httpError('Only 1 event is allowed for this street and year.', 409);
+      }
+      const events = await sql`
+        INSERT INTO utsav_seva.events (
+          street_id, street_name, festival_name, year, event_name, description,
+          primary_organizer_id, primary_organizer_name, organizer_ids, member_count
+        ) VALUES (
+          ${streetId}, ${streetName}, ${festivalName}, ${year}, ${eventName}, ${description},
+          ${actor.uid}, ${actor.displayName || 'Organizer'}, ARRAY[${actor.uid}]::text[], 1
+        )
+        RETURNING *
+      `;
+      const event = events[0];
+      await sql`
+        INSERT INTO utsav_seva.event_members (event_id, user_id, display_name, photo_url, role, added_by)
+        VALUES (
+          ${event.id}, ${actor.uid}, ${actor.displayName || 'Organizer'}, NULL, 'primary_organizer', ${actor.uid}
+        )
+      `;
+      return event;
+    });
+    return { eventId: created.id, event: toEvent(created) };
+  } catch (error: any) {
+    if (error?.status) throw error;
+    if (String(error?.message || '').includes('uq_events_street_year') || String(error?.message || '').includes('idx_events_street_year')) {
+      throw httpError('Only 1 event is allowed for this street and year.', 409);
+    }
+    throw error;
+  }
+}
+
+async function createSubEventRecord(actor: Actor, eventId: string, body: any) {
+  const name = String(body.name || '').trim();
+  const date = String(body.date || '').trim();
+  if (!name) throw httpError('Sub-event name is required.', 400);
+  if (!date) throw httpError('Sub-event date is required.', 400);
+  const created = await withTransaction(async (sql) => {
+    await getEventRow(sql, eventId);
+    const rows = await sql`
+      INSERT INTO utsav_seva.sub_events (
+        event_id, name, description, date, time, location, cover_image_url, created_by
+      ) VALUES (
+        ${eventId}, ${name}, ${body.description?.trim() || null}, ${date},
+        ${body.time?.trim() || null}, ${body.location?.trim() || null},
+        ${body.coverImageUrl?.trim() || null}, ${body.createdBy || actor.uid}
+      )
+      RETURNING *
+    `;
+    await sql`
+      UPDATE utsav_seva.events
+      SET sub_event_count = sub_event_count + 1, updated_at = NOW()
+      WHERE id = ${eventId}
+    `;
+    return rows[0];
+  });
+  return toSubEvent(created);
+}
+
 const PLACEHOLDER_EVENT_IDS = new Set([
   'create',
   'donations',
@@ -179,6 +439,36 @@ dataRoutes.get('/users', async (c) => {
   return c.json({ users: rows.map(toUser) });
 });
 
+dataRoutes.get('/me', async (c) => {
+  const actor = c.get('actor');
+  const rows = await getDb()`SELECT * FROM utsav_seva.users WHERE uid = ${actor.uid} LIMIT 1`;
+  if (!rows[0]) {
+    return c.json({
+      user: {
+        uid: actor.uid,
+        displayName: actor.displayName,
+        email: actor.email,
+        role: actor.role,
+        removed: false,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      },
+    });
+  }
+  return c.json({ user: toUser({ ...rows[0], role: actor.role }) });
+});
+
+dataRoutes.get('/user', async (c) => {
+  const actor = c.get('actor');
+  const uid = String(c.req.query('uid') || actor.uid).trim();
+  if (actor.uid !== uid && actor.role !== 'superAdmin') {
+    return c.json({ error: 'Forbidden' }, 403);
+  }
+  const rows = await getDb()`SELECT * FROM utsav_seva.users WHERE uid = ${uid} LIMIT 1`;
+  if (!rows[0]) return c.json({ error: 'Not found' }, 404);
+  return c.json({ user: toUser(rows[0]) });
+});
+
 dataRoutes.get('/users/by-email', async (c) => {
   const email = String(c.req.query('email') || '')
     .trim()
@@ -194,6 +484,55 @@ dataRoutes.get('/users/by-email', async (c) => {
   return c.json({ exists: true, uid: user.uid, displayName: user.displayName, email: user.email });
 });
 
+dataRoutes.patch('/me', async (c) => {
+  const actor = c.get('actor');
+  const user = await patchUserRow(getDb(), actor, actor.uid, await c.req.json());
+  return c.json({ user });
+});
+
+dataRoutes.put('/me', async (c) => {
+  const actor = c.get('actor');
+  const user = await upsertUserRow(getDb(), actor, actor.uid, await c.req.json());
+  return c.json({ user });
+});
+
+dataRoutes.put('/user', async (c) => {
+  const actor = c.get('actor');
+  const body = await c.req.json();
+  const uid = String(body.uid || c.req.query('uid') || actor.uid).trim();
+  const user = await upsertUserRow(getDb(), actor, uid, body);
+  return c.json({ user });
+});
+
+dataRoutes.patch('/user', async (c) => {
+  const actor = c.get('actor');
+  const body = await c.req.json();
+  const uid = String(body.uid || c.req.query('uid') || actor.uid).trim();
+  const user = await patchUserRow(getDb(), actor, uid, body);
+  return c.json({ user });
+});
+
+dataRoutes.post('/sync-photo', async (c) => {
+  const actor = c.get('actor');
+  const body = await c.req.json();
+  const uid = String(body.uid || actor.uid).trim();
+  await syncUserPhoto(getDb(), actor, uid, String(body.photoURL || '').trim());
+  return c.json({ success: true });
+});
+
+dataRoutes.post('/remove-user', async (c) => {
+  requireSuper(c.get('actor'));
+  const uid = String((await c.req.json()).uid || c.req.query('uid') || '').trim();
+  if (!uid) return c.json({ error: 'uid is required' }, 400);
+  if (uid === c.get('actor').uid) return c.json({ error: 'You cannot remove your own account' }, 400);
+  await getDb()`
+    UPDATE utsav_seva.users
+    SET removed = TRUE, updated_at = NOW()
+    WHERE uid = ${uid}
+  `;
+  return c.json({ success: true });
+});
+
 dataRoutes.get('/users/:uid', async (c) => {
   const uid = c.req.param('uid');
   const actor = c.get('actor');
@@ -206,82 +545,13 @@ dataRoutes.get('/users/:uid', async (c) => {
 });
 
 dataRoutes.put('/users/:uid', async (c) => {
-  const uid = c.req.param('uid');
-  const actor = c.get('actor');
-  if (actor.uid !== uid && actor.role !== 'superAdmin') {
-    return c.json({ error: 'Forbidden' }, 403);
-  }
-  const body = await c.req.json();
-  const email = String(body.email || actor.email || '').trim().toLowerCase();
-  const displayName = String(body.displayName || '').trim();
-  const role =
-    isSuperAdminEmail(email) || body.role === 'superAdmin' ? 'superAdmin' : body.role === 'user' ? 'user' : null;
-
-  const sql = getDb();
-  const existing = await sql`SELECT * FROM utsav_seva.users WHERE uid = ${uid} LIMIT 1`;
-  if (existing[0]?.removed) return c.json({ user: toUser(existing[0]) });
-
-  const nextRole = role || existing[0]?.role || (isSuperAdminEmail(email) ? 'superAdmin' : 'user');
-  const rows = await sql`
-    INSERT INTO utsav_seva.users (
-      uid, display_name, email, phone_number, photo_url, street_id, street_name, role, fcm_token, updated_at
-    ) VALUES (
-      ${uid},
-      ${displayName || existing[0]?.display_name || ''},
-      ${email || existing[0]?.email || ''},
-      ${body.phoneNumber ?? existing[0]?.phone_number ?? null},
-      ${body.photoURL ?? existing[0]?.photo_url ?? null},
-      ${body.streetId ?? existing[0]?.street_id ?? null},
-      ${body.streetName ?? existing[0]?.street_name ?? null},
-      ${nextRole},
-      ${body.fcmToken ?? existing[0]?.fcm_token ?? null},
-      NOW()
-    )
-    ON CONFLICT (uid) DO UPDATE SET
-      display_name = COALESCE(EXCLUDED.display_name, utsav_seva.users.display_name),
-      email = COALESCE(NULLIF(EXCLUDED.email, ''), utsav_seva.users.email),
-      phone_number = COALESCE(EXCLUDED.phone_number, utsav_seva.users.phone_number),
-      photo_url = COALESCE(EXCLUDED.photo_url, utsav_seva.users.photo_url),
-      street_id = COALESCE(EXCLUDED.street_id, utsav_seva.users.street_id),
-      street_name = COALESCE(EXCLUDED.street_name, utsav_seva.users.street_name),
-      role = EXCLUDED.role,
-      fcm_token = COALESCE(EXCLUDED.fcm_token, utsav_seva.users.fcm_token),
-      updated_at = NOW()
-    RETURNING *
-  `;
-  return c.json({ user: toUser(rows[0]) });
+  const user = await upsertUserRow(getDb(), c.get('actor'), c.req.param('uid'), await c.req.json());
+  return c.json({ user });
 });
 
 dataRoutes.patch('/users/:uid', async (c) => {
-  const uid = c.req.param('uid');
-  const actor = c.get('actor');
-  if (actor.uid !== uid && actor.role !== 'superAdmin') {
-    return c.json({ error: 'Forbidden' }, 403);
-  }
-  const body = await c.req.json();
-  const sql = getDb();
-  const existing = await sql`SELECT * FROM utsav_seva.users WHERE uid = ${uid} LIMIT 1`;
-  if (!existing[0]) return c.json({ error: 'Not found' }, 404);
-
-  let role = existing[0].role;
-  if (actor.role === 'superAdmin' && (body.role === 'user' || body.role === 'superAdmin')) {
-    role = isSuperAdminEmail(existing[0].email) ? 'superAdmin' : body.role;
-  }
-
-  const rows = await sql`
-    UPDATE utsav_seva.users SET
-      display_name = ${body.displayName !== undefined ? String(body.displayName) : existing[0].display_name},
-      phone_number = ${body.phoneNumber !== undefined ? body.phoneNumber : existing[0].phone_number},
-      photo_url = ${body.photoURL !== undefined ? body.photoURL : existing[0].photo_url},
-      street_id = ${body.streetId !== undefined ? body.streetId : existing[0].street_id},
-      street_name = ${body.streetName !== undefined ? body.streetName : existing[0].street_name},
-      role = ${role},
-      fcm_token = ${body.fcmToken !== undefined ? body.fcmToken : existing[0].fcm_token},
-      updated_at = NOW()
-    WHERE uid = ${uid}
-    RETURNING *
-  `;
-  return c.json({ user: toUser(rows[0]) });
+  const user = await patchUserRow(getDb(), c.get('actor'), c.req.param('uid'), await c.req.json());
+  return c.json({ user });
 });
 
 dataRoutes.post('/users/:uid/remove', async (c) => {
@@ -298,20 +568,8 @@ dataRoutes.post('/users/:uid/remove', async (c) => {
 
 dataRoutes.post('/users/:uid/sync-photo', async (c) => {
   const uid = c.req.param('uid');
-  const actor = c.get('actor');
-  if (actor.uid !== uid && actor.role !== 'superAdmin') {
-    return c.json({ error: 'Forbidden' }, 403);
-  }
   const body = await c.req.json();
-  const photoURL = String(body.photoURL || '').trim();
-  if (!photoURL) return c.json({ error: 'photoURL is required' }, 400);
-  const sql = getDb();
-  await sql`
-    UPDATE utsav_seva.users SET photo_url = ${photoURL}, updated_at = NOW() WHERE uid = ${uid}
-  `;
-  await sql`
-    UPDATE utsav_seva.event_members SET photo_url = ${photoURL} WHERE user_id = ${uid}
-  `;
+  await syncUserPhoto(getDb(), c.get('actor'), uid, String(body.photoURL || '').trim());
   return c.json({ success: true });
 });
 
@@ -339,16 +597,8 @@ dataRoutes.get('/streets', async (c) => {
 });
 
 dataRoutes.post('/streets', async (c) => {
-  requireSuper(c.get('actor'));
-  const body = await c.req.json();
-  const name = String(body.name || '').trim();
-  if (!name) return c.json({ error: 'Street name is required' }, 400);
-  const rows = await getDb()`
-    INSERT INTO utsav_seva.streets (name, description, created_by)
-    VALUES (${name}, ${String(body.description || '').trim()}, ${c.get('actor').uid})
-    RETURNING *
-  `;
-  return c.json({ street: toStreet(rows[0]) });
+  const street = await createStreetRecord(c.get('actor'), await c.req.json());
+  return c.json({ street });
 });
 
 dataRoutes.patch('/streets/:id', async (c) => {
@@ -579,6 +829,57 @@ dataRoutes.get('/records', async (c) => {
   return c.json({ error: 'Unknown type' }, 400);
 });
 
+dataRoutes.post('/records', async (c) => {
+  try {
+  const actor = c.get('actor');
+  const body = await c.req.json();
+  const type = String(body.type || c.req.query('type') || '').trim();
+  const action = String(body.action || 'create').trim();
+  const sql = getDb();
+  const eventId = body.eventId ? await resolveEventId(sql, String(body.eventId)) : '';
+
+  if (type === 'user' && (action === 'patch' || action === 'update')) {
+    const uid = String(body.uid || actor.uid).trim();
+    return c.json({ user: await patchUserRow(sql, actor, uid, body) });
+  }
+  if (type === 'user' && (action === 'upsert' || action === 'create')) {
+    const uid = String(body.uid || actor.uid).trim();
+    return c.json({ user: await upsertUserRow(sql, actor, uid, body) });
+  }
+  if (type === 'sync-photo') {
+    await syncUserPhoto(sql, actor, String(body.uid || actor.uid).trim(), String(body.photoURL || '').trim());
+    return c.json({ success: true });
+  }
+  if (type === 'expense' && action === 'create') {
+    if (!eventId) return c.json({ error: 'eventId is required' }, 400);
+    return c.json({ expense: await createExpenseRecord(actor, eventId, body) });
+  }
+  if ((type === 'donation' || type === 'donations') && action === 'create') {
+    if (!eventId) return c.json({ error: 'eventId is required' }, 400);
+    return c.json({ donation: await createDonationRecord(actor, eventId, body, 'festival') });
+  }
+  if ((type === 'street-donation' || type === 'street-donations') && action === 'create') {
+    if (!eventId) return c.json({ error: 'eventId is required' }, 400);
+    return c.json({ donation: await createDonationRecord(actor, eventId, body, 'street') });
+  }
+  if (type === 'street' && action === 'create') {
+    return c.json({ street: await createStreetRecord(actor, body) });
+  }
+  if (type === 'event' && action === 'create') {
+    const created = await createEventRecord(actor, body);
+    return c.json({ success: true, ...created });
+  }
+  if ((type === 'sub-event' || type === 'sub-events') && action === 'create') {
+    if (!eventId) return c.json({ error: 'eventId is required' }, 400);
+    return c.json({ subEvent: await createSubEventRecord(actor, eventId, body) });
+  }
+  return c.json({ error: 'Unknown record type or action' }, 400);
+  } catch (error: any) {
+    if (error?.status) return c.json({ error: error.message }, error.status);
+    throw error;
+  }
+});
+
 dataRoutes.get('/events/:eventId', async (c) => {
   const sql = getDb();
   const eventId = await resolveEventId(sql, c.req.param('eventId'));
@@ -589,51 +890,11 @@ dataRoutes.get('/events/:eventId', async (c) => {
 });
 
 dataRoutes.post('/events', async (c) => {
-  const actor = c.get('actor');
-  const body = await c.req.json();
-  const streetId = String(body.streetId || '').trim();
-  const streetName = String(body.streetName || '').trim();
-  const festivalName = String(body.festivalName || '').trim();
-  const year = Number(body.year);
-  const eventName = String(body.eventName || '').trim();
-  const description = String(body.description || '').trim();
-  if (!streetId || !streetName || !festivalName || !eventName || !description || !Number.isFinite(year)) {
-    return c.json({ error: 'Missing required fields' }, 400);
-  }
-
   try {
-    const created = await withTransaction(async (sql) => {
-      const existing = await sql`
-        SELECT id FROM utsav_seva.events WHERE street_id = ${streetId} AND year = ${year}
-      `;
-      if (existing.length > 0) {
-        throw httpError('Only 1 event is allowed for this street and year.', 409);
-      }
-      const events = await sql`
-        INSERT INTO utsav_seva.events (
-          street_id, street_name, festival_name, year, event_name, description,
-          primary_organizer_id, primary_organizer_name, organizer_ids, member_count
-        ) VALUES (
-          ${streetId}, ${streetName}, ${festivalName}, ${year}, ${eventName}, ${description},
-          ${actor.uid}, ${actor.displayName || 'Organizer'}, ARRAY[${actor.uid}]::text[], 1
-        )
-        RETURNING *
-      `;
-      const event = events[0];
-      await sql`
-        INSERT INTO utsav_seva.event_members (event_id, user_id, display_name, photo_url, role, added_by)
-        VALUES (
-          ${event.id}, ${actor.uid}, ${actor.displayName || 'Organizer'}, NULL, 'primary_organizer', ${actor.uid}
-        )
-      `;
-      return event;
-    });
-    return c.json({ success: true, eventId: created.id, event: toEvent(created) });
+    const created = await createEventRecord(c.get('actor'), await c.req.json());
+    return c.json({ success: true, ...created });
   } catch (error: any) {
     if (error?.status) return c.json({ error: error.message }, error.status);
-    if (String(error?.message || '').includes('uq_events_street_year') || String(error?.message || '').includes('idx_events_street_year')) {
-      return c.json({ error: 'Only 1 event is allowed for this street and year.' }, 409);
-    }
     throw error;
   }
 });
@@ -906,34 +1167,11 @@ dataRoutes.get('/events/:eventId/sub-events/:subEventId', async (c) => {
 });
 
 dataRoutes.post('/events/:eventId/sub-events', async (c) => {
-  const eventId = c.req.param('eventId');
-  const actor = c.get('actor');
-  const body = await c.req.json();
-  const name = String(body.name || '').trim();
-  const date = String(body.date || '').trim();
-  if (!name) return c.json({ error: 'Sub-event name is required.' }, 400);
-  if (!date) return c.json({ error: 'Sub-event date is required.' }, 400);
   try {
-    const created = await withTransaction(async (sql) => {
-      await getEventRow(sql, eventId);
-      const rows = await sql`
-        INSERT INTO utsav_seva.sub_events (
-          event_id, name, description, date, time, location, cover_image_url, created_by
-        ) VALUES (
-          ${eventId}, ${name}, ${body.description?.trim() || null}, ${date},
-          ${body.time?.trim() || null}, ${body.location?.trim() || null},
-          ${body.coverImageUrl?.trim() || null}, ${body.createdBy || actor.uid}
-        )
-        RETURNING *
-      `;
-      await sql`
-        UPDATE utsav_seva.events
-        SET sub_event_count = sub_event_count + 1, updated_at = NOW()
-        WHERE id = ${eventId}
-      `;
-      return rows[0];
-    });
-    return c.json({ subEvent: toSubEvent(created) });
+    const sql = getDb();
+    const eventId = await resolveEventId(sql, c.req.param('eventId'));
+    const subEvent = await createSubEventRecord(c.get('actor'), eventId, await c.req.json());
+    return c.json({ subEvent });
   } catch (error: any) {
     if (error?.status) return c.json({ error: error.message }, error.status);
     throw error;
@@ -1049,40 +1287,10 @@ dataRoutes.get('/events/:eventId/expenses/:expenseId', async (c) => {
 });
 
 dataRoutes.post('/events/:eventId/expenses', async (c) => {
-  const eventId = c.req.param('eventId');
-  const actor = c.get('actor');
-  const body = await c.req.json();
-  const amount = num(body.amount);
-  const created = await withTransaction(async (sql) => {
-    const rows = await sql`
-      INSERT INTO utsav_seva.expenses (
-        event_id, title, amount, category, other_category, description, date, sub_event_id,
-        receipt_urls, uploaded_by, uploaded_by_name
-      ) VALUES (
-        ${eventId},
-        ${String(body.title || '').trim()},
-        ${amount},
-        ${body.category ?? null},
-        ${body.otherCategory ?? null},
-        ${body.description ?? null},
-        ${body.date || new Date().toISOString()},
-        ${body.subEventId ?? null},
-        ${Array.isArray(body.receiptUrls) ? body.receiptUrls : []},
-        ${body.uploadedBy || actor.uid},
-        ${body.uploadedByName || actor.displayName || ''}
-      )
-      RETURNING *
-    `;
-    if (amount) {
-      await sql`
-        UPDATE utsav_seva.events
-        SET total_expenses = total_expenses + ${amount}, updated_at = NOW()
-        WHERE id = ${eventId}
-      `;
-    }
-    return rows[0];
-  });
-  return c.json({ expense: toExpense(created) });
+  const sql = getDb();
+  const eventId = await resolveEventId(sql, c.req.param('eventId'));
+  const expense = await createExpenseRecord(c.get('actor'), eventId, await c.req.json());
+  return c.json({ expense });
 });
 
 dataRoutes.patch('/events/:eventId/expenses/:expenseId', async (c) => {
@@ -1188,38 +1396,10 @@ dataRoutes.get('/events/:eventId/donations', async (c) => {
 });
 
 dataRoutes.post('/events/:eventId/donations', async (c) => {
-  const eventId = c.req.param('eventId');
-  const actor = c.get('actor');
-  const body = await c.req.json();
-  const amount = num(body.amount);
-  const status = body.status === 'pending' ? 'pending' : 'given';
-  const created = await withTransaction(async (sql) => {
-    const rows = await sql`
-      INSERT INTO utsav_seva.donations (
-        event_id, donor_name, amount, note, photo_url, status, date, uploaded_by, uploaded_by_name
-      ) VALUES (
-        ${eventId},
-        ${String(body.donorName || '').trim()},
-        ${amount},
-        ${body.note || ''},
-        ${body.photoUrl || null},
-        ${status},
-        ${new Date().toISOString()},
-        ${body.uploadedBy || actor.uid},
-        ${body.uploadedByName || actor.displayName || ''}
-      )
-      RETURNING *
-    `;
-    if (status === 'given' && amount) {
-      await sql`
-        UPDATE utsav_seva.events
-        SET total_donations = total_donations + ${amount}, updated_at = NOW()
-        WHERE id = ${eventId}
-      `;
-    }
-    return { ...rows[0], liked_by: [] };
-  });
-  return c.json({ donation: toDonation(created) });
+  const sql = getDb();
+  const eventId = await resolveEventId(sql, c.req.param('eventId'));
+  const donation = await createDonationRecord(c.get('actor'), eventId, await c.req.json(), 'festival');
+  return c.json({ donation });
 });
 
 dataRoutes.patch('/events/:eventId/donations/:donationId', async (c) => {
@@ -1251,38 +1431,10 @@ dataRoutes.get('/events/:eventId/street-donations', async (c) => {
 });
 
 dataRoutes.post('/events/:eventId/street-donations', async (c) => {
-  const eventId = c.req.param('eventId');
-  const actor = c.get('actor');
-  const body = await c.req.json();
-  const amount = num(body.amount);
-  const status = body.status === 'pending' ? 'pending' : 'given';
-  const created = await withTransaction(async (sql) => {
-    const rows = await sql`
-      INSERT INTO utsav_seva.street_donations (
-        event_id, donor_name, amount, note, photo_url, status, date, uploaded_by, uploaded_by_name
-      ) VALUES (
-        ${eventId},
-        ${String(body.donorName || '').trim()},
-        ${amount},
-        ${body.note || ''},
-        ${body.photoUrl || null},
-        ${status},
-        ${new Date().toISOString()},
-        ${body.uploadedBy || actor.uid},
-        ${body.uploadedByName || actor.displayName || ''}
-      )
-      RETURNING *
-    `;
-    if (status === 'given' && amount) {
-      await sql`
-        UPDATE utsav_seva.events
-        SET total_street_donations = total_street_donations + ${amount}, updated_at = NOW()
-        WHERE id = ${eventId}
-      `;
-    }
-    return { ...rows[0], liked_by: [] };
-  });
-  return c.json({ donation: toDonation(created) });
+  const sql = getDb();
+  const eventId = await resolveEventId(sql, c.req.param('eventId'));
+  const donation = await createDonationRecord(c.get('actor'), eventId, await c.req.json(), 'street');
+  return c.json({ donation });
 });
 
 dataRoutes.patch('/events/:eventId/street-donations/:donationId', async (c) => {

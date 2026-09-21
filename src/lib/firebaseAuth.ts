@@ -33,7 +33,7 @@ export async function verifyFirebaseToken(authHeader: string | undefined): Promi
   return { uid, email: String(payload.email || '').toLowerCase() };
 }
 
-export const SUPER_ADMIN_EMAILS = ['madhu.palli@cognine.com'];
+export const SUPER_ADMIN_EMAILS = ['madhu.palli@cognine.com', 'madhu.palli@gmail.com'];
 
 export function isSuperAdminEmail(email?: string | null) {
   return !!email && SUPER_ADMIN_EMAILS.includes(email.trim().toLowerCase());
