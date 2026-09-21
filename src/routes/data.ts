@@ -373,16 +373,20 @@ dataRoutes.get('/events', async (c) => {
 });
 
 dataRoutes.get('/events/mine', async (c) => {
-  const uid = c.get('actor').uid;
-  const rows = await getDb()`
-    SELECT DISTINCT e.*
-    FROM utsav_seva.events e
-    LEFT JOIN utsav_seva.event_members m ON m.event_id = e.id
-    WHERE e.primary_organizer_id = ${uid}
-       OR ${uid} = ANY(e.organizer_ids)
-       OR m.user_id = ${uid}
-    ORDER BY e.created_at DESC
-  `;
+  const actor = c.get('actor');
+  const uid = actor.uid;
+  const rows =
+    actor.role === 'superAdmin'
+      ? await getDb()`SELECT * FROM utsav_seva.events ORDER BY created_at DESC`
+      : await getDb()`
+          SELECT DISTINCT e.*
+          FROM utsav_seva.events e
+          LEFT JOIN utsav_seva.event_members m ON m.event_id = e.id
+          WHERE e.primary_organizer_id = ${uid}
+             OR ${uid} = ANY(e.organizer_ids)
+             OR m.user_id = ${uid}
+          ORDER BY e.created_at DESC
+        `;
   return c.json({ events: rows.map(toEvent) });
 });
 
