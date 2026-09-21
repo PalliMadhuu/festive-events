@@ -1,0 +1,12 @@
+{
+  "expo": {
+    "extra": {
+      "eas": {
+        "projectId": "6533fa1f-19d9-4ff5-8145-c967701e5731"
+      }
+    },
+    "android": {
+      "package": "com.madhujesteam.festiveeventsbe"
+    }
+  }
+}

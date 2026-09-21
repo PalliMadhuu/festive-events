@@ -149,13 +149,56 @@ export async function handleRecordsPost(c: any) {
       if (!eventId) return c.json({ error: 'eventId is required' }, 400);
       return c.json({ expense: await createExpenseRecord(actor, eventId, body) });
     }
+    if (type === 'expense' && (action === 'update' || action === 'patch')) {
+      const expenseId = String(body.id || body.expenseId || '').trim();
+      if (!eventId || !expenseId) return c.json({ error: 'eventId and id are required' }, 400);
+      return c.json({ expense: await updateExpenseRecord(actor, eventId, expenseId, body) });
+    }
+    if (type === 'expense' && action === 'delete') {
+      const expenseId = String(body.id || body.expenseId || '').trim();
+      if (!eventId || !expenseId) return c.json({ error: 'eventId and id are required' }, 400);
+      await deleteExpenseRecord(actor, eventId, expenseId, String(body.reason || '').trim());
+      return c.json({ success: true });
+    }
     if ((type === 'donation' || type === 'donations') && action === 'create') {
       if (!eventId) return c.json({ error: 'eventId is required' }, 400);
       return c.json({ donation: await createDonationRecord(actor, eventId, body, 'festival') });
     }
+    if ((type === 'donation' || type === 'donations') && (action === 'update' || action === 'patch')) {
+      const donationId = String(body.id || body.donationId || '').trim();
+      if (!eventId || !donationId) return c.json({ error: 'eventId and id are required' }, 400);
+      return c.json({ donation: await patchDonationRecord(actor, eventId, donationId, body, 'festival') });
+    }
+    if ((type === 'donation' || type === 'donations') && action === 'delete') {
+      const donationId = String(body.id || body.donationId || '').trim();
+      if (!eventId || !donationId) return c.json({ error: 'eventId and id are required' }, 400);
+      await softDeleteDonationRecord(actor, eventId, donationId, String(body.reason || '').trim(), 'festival');
+      return c.json({ success: true });
+    }
+    if ((type === 'donation' || type === 'donations') && action === 'like') {
+      const donationId = String(body.id || body.donationId || '').trim();
+      if (!donationId) return c.json({ error: 'id is required' }, 400);
+      return c.json({ donation: await toggleLikeRecord(actor, donationId, 'festival') });
+    }
     if ((type === 'street-donation' || type === 'street-donations') && action === 'create') {
       if (!eventId) return c.json({ error: 'eventId is required' }, 400);
       return c.json({ donation: await createDonationRecord(actor, eventId, body, 'street') });
+    }
+    if ((type === 'street-donation' || type === 'street-donations') && (action === 'update' || action === 'patch')) {
+      const donationId = String(body.id || body.donationId || '').trim();
+      if (!eventId || !donationId) return c.json({ error: 'eventId and id are required' }, 400);
+      return c.json({ donation: await patchDonationRecord(actor, eventId, donationId, body, 'street') });
+    }
+    if ((type === 'street-donation' || type === 'street-donations') && action === 'delete') {
+      const donationId = String(body.id || body.donationId || '').trim();
+      if (!eventId || !donationId) return c.json({ error: 'eventId and id are required' }, 400);
+      await softDeleteDonationRecord(actor, eventId, donationId, String(body.reason || '').trim(), 'street');
+      return c.json({ success: true });
+    }
+    if ((type === 'street-donation' || type === 'street-donations') && action === 'like') {
+      const donationId = String(body.id || body.donationId || '').trim();
+      if (!donationId) return c.json({ error: 'id is required' }, 400);
+      return c.json({ donation: await toggleLikeRecord(actor, donationId, 'street') });
     }
     if (type === 'street' && action === 'create') {
       return c.json({ street: await createStreetRecord(actor, body) });
@@ -167,6 +210,249 @@ export async function handleRecordsPost(c: any) {
     if ((type === 'sub-event' || type === 'sub-events') && action === 'create') {
       if (!eventId) return c.json({ error: 'eventId is required' }, 400);
       return c.json({ subEvent: await createSubEventRecord(actor, eventId, body) });
+    }
+    if ((type === 'sub-event' || type === 'sub-events') && (action === 'update' || action === 'patch')) {
+      const subEventId = String(body.id || body.subEventId || '').trim();
+      if (!eventId || !subEventId) return c.json({ error: 'eventId and id are required' }, 400);
+      return c.json({ subEvent: await updateSubEventRecord(eventId, subEventId, body) });
+    }
+    if ((type === 'sub-event' || type === 'sub-events') && action === 'delete') {
+      const subEventId = String(body.id || body.subEventId || '').trim();
+      if (!eventId || !subEventId) return c.json({ error: 'eventId and id are required' }, 400);
+      await deleteSubEventRecord(eventId, subEventId);
+      return c.json({ success: true });
+    }
+    if (type === 'event' && (action === 'update' || action === 'patch')) {
+      if (!eventId) return c.json({ error: 'eventId is required' }, 400);
+      const event = await getEventRow(sql, eventId);
+      if (!canManageEvent(actor, event)) return c.json({ error: 'Forbidden' }, 403);
+      const rows = await sql`
+        UPDATE utsav_seva.events SET
+          event_name = ${body.eventName !== undefined ? String(body.eventName) : event.event_name},
+          description = ${body.description !== undefined ? body.description : event.description},
+          cover_image_url = ${body.coverImageUrl !== undefined ? body.coverImageUrl : event.cover_image_url},
+          status = ${body.status !== undefined ? body.status : event.status},
+          gallery_enabled = ${body.galleryEnabled !== undefined ? !!body.galleryEnabled : event.gallery_enabled},
+          street_name = ${body.streetName !== undefined ? body.streetName : event.street_name},
+          festival_name = ${body.festivalName !== undefined ? body.festivalName : event.festival_name},
+          updated_at = NOW()
+        WHERE id = ${eventId}
+        RETURNING *
+      `;
+      return c.json({ event: toEvent(rows[0]) });
+    }
+    if (type === 'event' && action === 'delete') {
+      if (!eventId) return c.json({ error: 'eventId is required' }, 400);
+      const event = await getEventRow(sql, eventId);
+      if (actor.role !== 'superAdmin' && event.primary_organizer_id !== actor.uid) {
+        return c.json({ error: 'Forbidden' }, 403);
+      }
+      await sql`DELETE FROM utsav_seva.events WHERE id = ${eventId}`;
+      return c.json({ success: true });
+    }
+    if (type === 'street' && (action === 'update' || action === 'patch')) {
+      requireSuper(actor);
+      const id = String(body.id || '').trim();
+      if (!id) return c.json({ error: 'id is required' }, 400);
+      const rows = await sql`
+        UPDATE utsav_seva.streets SET
+          name = COALESCE(${body.name != null ? String(body.name).trim() : null}, name),
+          description = COALESCE(${body.description != null ? String(body.description).trim() : null}, description)
+        WHERE id = ${id}
+        RETURNING *
+      `;
+      if (!rows[0]) return c.json({ error: 'Not found' }, 404);
+      return c.json({ street: toStreet(rows[0]) });
+    }
+    if (type === 'street' && action === 'delete') {
+      requireSuper(actor);
+      const id = String(body.id || '').trim();
+      if (!id) return c.json({ error: 'id is required' }, 400);
+      await sql`DELETE FROM utsav_seva.streets WHERE id = ${id}`;
+      return c.json({ success: true });
+    }
+    if (type === 'festival' && (action === 'update' || action === 'patch')) {
+      requireSuper(actor);
+      const id = String(body.id || '').trim();
+      if (!id) return c.json({ error: 'id is required' }, 400);
+      const existing = await sql`SELECT * FROM utsav_seva.festivals WHERE id = ${id} LIMIT 1`;
+      if (!existing[0]) return c.json({ error: 'Not found' }, 404);
+      const rows = await sql`
+        UPDATE utsav_seva.festivals SET
+          name = ${body.name !== undefined ? String(body.name).trim() : existing[0].name},
+          year = ${body.year !== undefined ? Number(body.year) : existing[0].year},
+          date = ${body.date !== undefined ? String(body.date).trim() : existing[0].date},
+          emoji = ${body.emoji !== undefined ? body.emoji : existing[0].emoji},
+          image_url = ${body.imageUrl !== undefined ? body.imageUrl : existing[0].image_url}
+        WHERE id = ${id}
+        RETURNING *
+      `;
+      return c.json({ festival: toFestival(rows[0]) });
+    }
+    if (type === 'festival' && action === 'delete') {
+      requireSuper(actor);
+      const id = String(body.id || '').trim();
+      if (!id) return c.json({ error: 'id is required' }, 400);
+      await sql`DELETE FROM utsav_seva.festivals WHERE id = ${id}`;
+      return c.json({ success: true });
+    }
+    if (type === 'join-request' && (action === 'upsert' || action === 'create')) {
+      const uid = String(body.uid || actor.uid).trim();
+      if (!eventId || !uid) return c.json({ error: 'eventId and uid are required' }, 400);
+      if (actor.uid !== uid && actor.role !== 'superAdmin') return c.json({ error: 'Forbidden' }, 403);
+      const rows = await sql`
+        INSERT INTO utsav_seva.join_requests (
+          event_id, uid, display_name, photo_url, email, status, message
+        ) VALUES (
+          ${eventId}, ${uid},
+          ${String(body.displayName || actor.displayName || '')},
+          ${body.photoURL || null},
+          ${String(body.email || actor.email || '')},
+          'pending',
+          ${String(body.message || '')}
+        )
+        ON CONFLICT (event_id, uid) DO UPDATE SET
+          display_name = EXCLUDED.display_name,
+          photo_url = EXCLUDED.photo_url,
+          email = EXCLUDED.email,
+          status = 'pending',
+          message = EXCLUDED.message,
+          requested_at = NOW(),
+          reviewed_at = NULL,
+          reviewed_by = NULL
+        RETURNING *
+      `;
+      return c.json({ request: toJoinRequest(rows[0]) });
+    }
+    if (type === 'join-request' && action === 'approve') {
+      const uid = String(body.uid || body.userId || '').trim();
+      if (!eventId || !uid) return c.json({ error: 'eventId and uid are required' }, 400);
+      await withTransaction(async (tx) => {
+        const event = await getEventRow(tx, eventId);
+        if (!canManageEvent(actor, event)) throw httpError('Only organizers can approve join requests.', 403);
+        const join = await tx`
+          SELECT * FROM utsav_seva.join_requests WHERE event_id = ${eventId} AND uid = ${uid} LIMIT 1
+        `;
+        if (!join[0]) throw httpError('Join request not found.', 404);
+        if (join[0].status !== 'pending') throw httpError('Join request is not pending.', 400);
+        await tx`
+          UPDATE utsav_seva.join_requests
+          SET status = 'approved', reviewed_at = NOW(), reviewed_by = ${actor.uid}
+          WHERE event_id = ${eventId} AND uid = ${uid}
+        `;
+        await tx`
+          INSERT INTO utsav_seva.event_members (event_id, user_id, display_name, photo_url, role, added_by)
+          VALUES (${eventId}, ${uid}, ${join[0].display_name || ''}, ${join[0].photo_url}, 'member', ${actor.uid})
+          ON CONFLICT (event_id, user_id) DO NOTHING
+        `;
+        await tx`
+          UPDATE utsav_seva.events SET member_count = member_count + 1, updated_at = NOW() WHERE id = ${eventId}
+        `;
+      });
+      return c.json({ success: true });
+    }
+    if (type === 'join-request' && action === 'reject') {
+      const uid = String(body.uid || body.userId || '').trim();
+      if (!eventId || !uid) return c.json({ error: 'eventId and uid are required' }, 400);
+      const event = await getEventRow(sql, eventId);
+      if (!canManageEvent(actor, event)) return c.json({ error: 'Only organizers can reject join requests.' }, 403);
+      await sql`
+        UPDATE utsav_seva.join_requests
+        SET status = 'rejected', reviewed_at = NOW(), reviewed_by = ${actor.uid}
+        WHERE event_id = ${eventId} AND uid = ${uid}
+      `;
+      return c.json({ success: true });
+    }
+    if (type === 'member' && action === 'promote') {
+      const userId = String(body.userId || body.uid || '').trim();
+      if (!eventId || !userId) return c.json({ error: 'eventId and userId are required' }, 400);
+      await withTransaction(async (tx) => {
+        const event = await getEventRow(tx, eventId);
+        if (!canManageEvent(actor, event)) throw httpError('Forbidden', 403);
+        await tx`
+          UPDATE utsav_seva.event_members SET role = 'organizer'
+          WHERE event_id = ${eventId} AND user_id = ${userId}
+        `;
+        await tx`
+          UPDATE utsav_seva.events
+          SET organizer_ids = ARRAY(SELECT DISTINCT unnest(organizer_ids || ARRAY[${userId}::text])),
+              updated_at = NOW()
+          WHERE id = ${eventId}
+        `;
+      });
+      return c.json({ success: true });
+    }
+    if (type === 'member' && action === 'demote') {
+      const userId = String(body.userId || body.uid || '').trim();
+      if (!eventId || !userId) return c.json({ error: 'eventId and userId are required' }, 400);
+      await withTransaction(async (tx) => {
+        const event = await getEventRow(tx, eventId);
+        if (!canManageEvent(actor, event)) throw httpError('Forbidden', 403);
+        if (userId === event.primary_organizer_id) throw httpError('Cannot demote the primary organizer', 400);
+        await tx`
+          UPDATE utsav_seva.event_members SET role = 'member'
+          WHERE event_id = ${eventId} AND user_id = ${userId}
+        `;
+        await tx`
+          UPDATE utsav_seva.events
+          SET organizer_ids = array_remove(organizer_ids, ${userId}), updated_at = NOW()
+          WHERE id = ${eventId}
+        `;
+      });
+      return c.json({ success: true });
+    }
+    if (type === 'member' && action === 'delete') {
+      const userId = String(body.userId || body.uid || '').trim();
+      if (!eventId || !userId) return c.json({ error: 'eventId and userId are required' }, 400);
+      await withTransaction(async (tx) => {
+        const event = await getEventRow(tx, eventId);
+        if (!canManageEvent(actor, event)) throw httpError('Forbidden', 403);
+        if (userId === event.primary_organizer_id) throw httpError('Cannot remove the primary organizer.', 400);
+        await tx`DELETE FROM utsav_seva.event_members WHERE event_id = ${eventId} AND user_id = ${userId}`;
+        await tx`
+          UPDATE utsav_seva.events
+          SET member_count = GREATEST(member_count - 1, 0),
+              organizer_ids = array_remove(organizer_ids, ${userId}),
+              updated_at = NOW()
+          WHERE id = ${eventId}
+        `;
+      });
+      return c.json({ success: true });
+    }
+    if (type === 'album' && action === 'create') {
+      if (!eventId) return c.json({ error: 'eventId is required' }, 400);
+      const name = String(body.name || '').trim();
+      if (!name) return c.json({ error: 'Album name is required' }, 400);
+      const rows = await sql`
+        INSERT INTO public.albums (event_id, name, created_by, created_by_name)
+        VALUES (${eventId}, ${name}, ${actor.uid}, ${actor.displayName || null})
+        RETURNING *
+      `;
+      return c.json({ album: toAlbum(rows[0]) });
+    }
+    if (type === 'album' && (action === 'update' || action === 'patch')) {
+      const albumId = String(body.id || body.albumId || '').trim();
+      if (!eventId || !albumId) return c.json({ error: 'eventId and id are required' }, 400);
+      const rows = await sql`
+        UPDATE public.albums SET
+          name = COALESCE(${body.name != null ? String(body.name) : null}, name),
+          cover_url = COALESCE(${body.coverUrl != null ? body.coverUrl : null}, cover_url),
+          updated_at = NOW()
+        WHERE id = ${albumId} AND event_id = ${eventId}
+        RETURNING *
+      `;
+      if (!rows[0]) return c.json({ error: 'Not found' }, 404);
+      return c.json({ album: toAlbum(rows[0]) });
+    }
+    if (type === 'album' && action === 'delete') {
+      const albumId = String(body.id || body.albumId || '').trim();
+      if (!eventId || !albumId) return c.json({ error: 'eventId and id are required' }, 400);
+      await sql`
+        UPDATE public.albums
+        SET deleted = TRUE, deleted_at = NOW(), updated_at = NOW()
+        WHERE id = ${albumId} AND event_id = ${eventId}
+      `;
+      return c.json({ success: true });
     }
     return c.json({ error: 'Unknown record type or action' }, 400);
   } catch (error: any) {
@@ -455,6 +741,212 @@ async function createSubEventRecord(actor: Actor, eventId: string, body: any) {
     return rows[0];
   });
   return toSubEvent(created);
+}
+
+async function updateExpenseRecord(actor: Actor, eventId: string, expenseId: string, body: any) {
+  const updated = await withTransaction(async (sql) => {
+    const snap = await sql`
+      SELECT * FROM utsav_seva.expenses WHERE event_id = ${eventId} AND id = ${expenseId} LIMIT 1
+    `;
+    if (!snap[0]) throw httpError('Expense not found.', 404);
+    if (snap[0].deleted) throw httpError('Deleted expenses cannot be edited.', 400);
+    const oldAmount = num(snap[0].amount);
+    const nextAmount = body.amount != null ? num(body.amount) : oldAmount;
+    const rows = await sql`
+      UPDATE utsav_seva.expenses SET
+        title = ${body.title !== undefined ? String(body.title) : snap[0].title},
+        amount = ${nextAmount},
+        category = ${body.category !== undefined ? body.category : snap[0].category},
+        other_category = ${body.otherCategory !== undefined ? body.otherCategory : snap[0].other_category},
+        description = ${body.description !== undefined ? body.description : snap[0].description},
+        date = ${body.date !== undefined ? body.date : snap[0].date},
+        sub_event_id = ${body.subEventId !== undefined ? body.subEventId : snap[0].sub_event_id},
+        receipt_urls = ${body.receiptUrls !== undefined ? body.receiptUrls : snap[0].receipt_urls},
+        updated_at = NOW(),
+        updated_by = ${actor.uid},
+        updated_by_name = ${actor.displayName || 'Organizer'}
+      WHERE id = ${expenseId}
+      RETURNING *
+    `;
+    const delta = nextAmount - oldAmount;
+    if (delta) {
+      await sql`
+        UPDATE utsav_seva.events
+        SET total_expenses = total_expenses + ${delta}, updated_at = NOW()
+        WHERE id = ${eventId}
+      `;
+    }
+    return rows[0];
+  });
+  return toExpense(updated);
+}
+
+async function deleteExpenseRecord(actor: Actor, eventId: string, expenseId: string, reason: string) {
+  if (!reason) throw httpError('Please provide a reason for deleting this expense.', 400);
+  await withTransaction(async (sql) => {
+    const snap = await sql`
+      SELECT * FROM utsav_seva.expenses WHERE event_id = ${eventId} AND id = ${expenseId} LIMIT 1
+    `;
+    if (!snap[0]) return;
+    if (snap[0].deleted) throw httpError('This expense is already deleted.', 400);
+    const amount = num(snap[0].amount);
+    await sql`
+      UPDATE utsav_seva.expenses SET
+        deleted = TRUE, deleted_at = NOW(), deleted_by = ${actor.uid},
+        deleted_by_name = ${actor.displayName || 'Organizer'},
+        deletion_reason = ${reason}, updated_at = NOW()
+      WHERE id = ${expenseId}
+    `;
+    if (amount) {
+      await sql`
+        UPDATE utsav_seva.events
+        SET total_expenses = total_expenses - ${amount}, updated_at = NOW()
+        WHERE id = ${eventId}
+      `;
+    }
+  });
+}
+
+async function updateSubEventRecord(eventId: string, subEventId: string, body: any) {
+  const existing = await getDb()`
+    SELECT * FROM utsav_seva.sub_events
+    WHERE event_id = ${eventId} AND id = ${subEventId} LIMIT 1
+  `;
+  if (!existing[0]) throw httpError('Not found', 404);
+  const rows = await getDb()`
+    UPDATE utsav_seva.sub_events SET
+      name = ${body.name !== undefined ? String(body.name).trim() : existing[0].name},
+      date = ${body.date !== undefined ? String(body.date).trim() : existing[0].date},
+      description = ${body.description !== undefined ? String(body.description).trim() || null : existing[0].description},
+      time = ${body.time !== undefined ? String(body.time).trim() || null : existing[0].time},
+      location = ${body.location !== undefined ? String(body.location).trim() || null : existing[0].location},
+      cover_image_url = ${
+        body.coverImageUrl !== undefined ? String(body.coverImageUrl).trim() || null : existing[0].cover_image_url
+      },
+      updated_at = NOW()
+    WHERE id = ${subEventId}
+    RETURNING *
+  `;
+  return toSubEvent(rows[0]);
+}
+
+async function deleteSubEventRecord(eventId: string, subEventId: string) {
+  await withTransaction(async (sql) => {
+    await sql`DELETE FROM utsav_seva.sub_events WHERE event_id = ${eventId} AND id = ${subEventId}`;
+    await sql`
+      UPDATE utsav_seva.events
+      SET sub_event_count = GREATEST(sub_event_count - 1, 0), updated_at = NOW()
+      WHERE id = ${eventId}
+    `;
+  });
+}
+
+async function patchDonationRecord(
+  actor: Actor,
+  eventId: string,
+  donationId: string,
+  body: any,
+  kind: 'festival' | 'street'
+) {
+  const table = kind === 'festival' ? 'utsav_seva.donations' : 'utsav_seva.street_donations';
+  const totalCol = kind === 'festival' ? 'total_donations' : 'total_street_donations';
+  const updated = await withTransaction(async (sql) => {
+    const rows = await sql.query(`SELECT * FROM ${table} WHERE event_id = $1 AND id = $2 LIMIT 1`, [
+      eventId,
+      donationId,
+    ]);
+    if (!rows[0]) throw httpError(kind === 'festival' ? 'Donation not found.' : 'Street donation not found.', 404);
+    if (rows[0].deleted) throw httpError('Deleted donations cannot be edited.', 400);
+    const oldAmount = num(rows[0].amount);
+    const nextAmount = body.amount != null ? num(body.amount) : oldAmount;
+    const oldStatus = rows[0].status === 'pending' ? 'pending' : 'given';
+    const nextStatus = body.status === 'pending' || body.status === 'given' ? body.status : oldStatus;
+    const oldCounted = oldStatus === 'given' ? oldAmount : 0;
+    const nextCounted = nextStatus === 'given' ? nextAmount : 0;
+    const delta = nextCounted - oldCounted;
+    const donorName = body.donorName !== undefined ? String(body.donorName) : rows[0].donor_name;
+    const note = body.note !== undefined ? body.note : rows[0].note;
+    const photoUrl = body.photoUrl !== undefined ? body.photoUrl : rows[0].photo_url;
+    const updatedRows = await sql.query(
+      `UPDATE ${table} SET
+        donor_name = $1,
+        amount = $2,
+        note = $3,
+        photo_url = $4,
+        status = $5,
+        updated_at = NOW(),
+        updated_by = $6,
+        updated_by_name = $7
+      WHERE id = $8
+      RETURNING *`,
+      [donorName, nextAmount, note, photoUrl, nextStatus, actor.uid, actor.displayName || 'Organizer', donationId]
+    );
+    if (delta) {
+      await sql.query(
+        `UPDATE utsav_seva.events SET ${totalCol} = ${totalCol} + $1, updated_at = NOW() WHERE id = $2`,
+        [delta, eventId]
+      );
+    }
+    return { ...updatedRows[0], liked_by: [] };
+  });
+  return toDonation(updated);
+}
+
+async function toggleLikeRecord(actor: Actor, donationId: string, kind: 'festival' | 'street') {
+  const table = kind === 'festival' ? 'utsav_seva.donations' : 'utsav_seva.street_donations';
+  const likeTable = kind === 'festival' ? 'utsav_seva.donation_likes' : 'utsav_seva.street_donation_likes';
+  const updated = await withTransaction(async (sql) => {
+    const snap = await sql.query(`SELECT * FROM ${table} WHERE id = $1 LIMIT 1`, [donationId]);
+    if (!snap[0]) throw httpError('Donation not found.', 404);
+    if (snap[0].deleted) throw httpError('Deleted donations cannot be liked.', 400);
+    const existing = await sql.query(`SELECT 1 FROM ${likeTable} WHERE donation_id = $1 AND user_id = $2`, [
+      donationId,
+      actor.uid,
+    ]);
+    if (existing[0]) {
+      await sql.query(`DELETE FROM ${likeTable} WHERE donation_id = $1 AND user_id = $2`, [donationId, actor.uid]);
+    } else {
+      await sql.query(`INSERT INTO ${likeTable} (donation_id, user_id) VALUES ($1, $2)`, [donationId, actor.uid]);
+    }
+    const liked = await sql.query(`SELECT user_id FROM ${likeTable} WHERE donation_id = $1`, [donationId]);
+    return { ...snap[0], liked_by: liked.map((r: any) => r.user_id) };
+  });
+  return toDonation(updated);
+}
+
+async function softDeleteDonationRecord(
+  actor: Actor,
+  eventId: string,
+  donationId: string,
+  reason: string,
+  kind: 'festival' | 'street'
+) {
+  if (!reason) throw httpError('Please provide a reason for deleting this donation.', 400);
+  const table = kind === 'festival' ? 'utsav_seva.donations' : 'utsav_seva.street_donations';
+  const totalCol = kind === 'festival' ? 'total_donations' : 'total_street_donations';
+  await withTransaction(async (sql) => {
+    const snap = await sql.query(`SELECT * FROM ${table} WHERE event_id = $1 AND id = $2 LIMIT 1`, [
+      eventId,
+      donationId,
+    ]);
+    if (!snap[0]) return;
+    if (snap[0].deleted) throw httpError('This donation is already deleted.', 400);
+    const amount = num(snap[0].amount);
+    const wasGiven = snap[0].status !== 'pending';
+    await sql.query(
+      `UPDATE ${table} SET
+        deleted = TRUE, deleted_at = NOW(), deleted_by = $1, deleted_by_name = $2,
+        deletion_reason = $3
+      WHERE id = $4`,
+      [actor.uid, actor.displayName || 'Organizer', reason, donationId]
+    );
+    if (wasGiven && amount) {
+      await sql.query(
+        `UPDATE utsav_seva.events SET ${totalCol} = ${totalCol} - $1, updated_at = NOW() WHERE id = $2`,
+        [amount, eventId]
+      );
+    }
+  });
 }
 
 const PLACEHOLDER_EVENT_IDS = new Set([
@@ -1217,40 +1709,21 @@ dataRoutes.post('/events/:eventId/sub-events', async (c) => {
 });
 
 dataRoutes.patch('/events/:eventId/sub-events/:subEventId', async (c) => {
-  const body = await c.req.json();
-  const existing = await getDb()`
-    SELECT * FROM utsav_seva.sub_events
-    WHERE event_id = ${c.req.param('eventId')} AND id = ${c.req.param('subEventId')} LIMIT 1
-  `;
-  if (!existing[0]) return c.json({ error: 'Not found' }, 404);
-  const rows = await getDb()`
-    UPDATE utsav_seva.sub_events SET
-      name = ${body.name !== undefined ? String(body.name).trim() : existing[0].name},
-      date = ${body.date !== undefined ? String(body.date).trim() : existing[0].date},
-      description = ${body.description !== undefined ? String(body.description).trim() || null : existing[0].description},
-      time = ${body.time !== undefined ? String(body.time).trim() || null : existing[0].time},
-      location = ${body.location !== undefined ? String(body.location).trim() || null : existing[0].location},
-      cover_image_url = ${
-        body.coverImageUrl !== undefined ? String(body.coverImageUrl).trim() || null : existing[0].cover_image_url
-      },
-      updated_at = NOW()
-    WHERE id = ${c.req.param('subEventId')}
-    RETURNING *
-  `;
-  return c.json({ subEvent: toSubEvent(rows[0]) });
+  try {
+    const subEvent = await updateSubEventRecord(
+      c.req.param('eventId'),
+      c.req.param('subEventId'),
+      await c.req.json()
+    );
+    return c.json({ subEvent });
+  } catch (error: any) {
+    if (error?.status) return c.json({ error: error.message }, error.status);
+    throw error;
+  }
 });
 
 dataRoutes.delete('/events/:eventId/sub-events/:subEventId', async (c) => {
-  const eventId = c.req.param('eventId');
-  const subEventId = c.req.param('subEventId');
-  await withTransaction(async (sql) => {
-    await sql`DELETE FROM utsav_seva.sub_events WHERE event_id = ${eventId} AND id = ${subEventId}`;
-    await sql`
-      UPDATE utsav_seva.events
-      SET sub_event_count = GREATEST(sub_event_count - 1, 0), updated_at = NOW()
-      WHERE id = ${eventId}
-    `;
-  });
+  await deleteSubEventRecord(c.req.param('eventId'), c.req.param('subEventId'));
   return c.json({ success: true });
 });
 
@@ -1332,46 +1805,14 @@ dataRoutes.post('/events/:eventId/expenses', async (c) => {
 });
 
 dataRoutes.patch('/events/:eventId/expenses/:expenseId', async (c) => {
-  const eventId = c.req.param('eventId');
-  const expenseId = c.req.param('expenseId');
-  const actor = c.get('actor');
-  const body = await c.req.json();
   try {
-    const updated = await withTransaction(async (sql) => {
-      const snap = await sql`
-        SELECT * FROM utsav_seva.expenses WHERE event_id = ${eventId} AND id = ${expenseId} LIMIT 1
-      `;
-      if (!snap[0]) throw httpError('Expense not found.', 404);
-      if (snap[0].deleted) throw httpError('Deleted expenses cannot be edited.', 400);
-      const oldAmount = num(snap[0].amount);
-      const nextAmount = body.amount != null ? num(body.amount) : oldAmount;
-      const rows = await sql`
-        UPDATE utsav_seva.expenses SET
-          title = ${body.title !== undefined ? String(body.title) : snap[0].title},
-          amount = ${nextAmount},
-          category = ${body.category !== undefined ? body.category : snap[0].category},
-          other_category = ${body.otherCategory !== undefined ? body.otherCategory : snap[0].other_category},
-          description = ${body.description !== undefined ? body.description : snap[0].description},
-          date = ${body.date !== undefined ? body.date : snap[0].date},
-          sub_event_id = ${body.subEventId !== undefined ? body.subEventId : snap[0].sub_event_id},
-          receipt_urls = ${body.receiptUrls !== undefined ? body.receiptUrls : snap[0].receipt_urls},
-          updated_at = NOW(),
-          updated_by = ${actor.uid},
-          updated_by_name = ${actor.displayName || 'Organizer'}
-        WHERE id = ${expenseId}
-        RETURNING *
-      `;
-      const delta = nextAmount - oldAmount;
-      if (delta) {
-        await sql`
-          UPDATE utsav_seva.events
-          SET total_expenses = total_expenses + ${delta}, updated_at = NOW()
-          WHERE id = ${eventId}
-        `;
-      }
-      return rows[0];
-    });
-    return c.json({ expense: toExpense(updated) });
+    const expense = await updateExpenseRecord(
+      c.get('actor'),
+      c.req.param('eventId'),
+      c.req.param('expenseId'),
+      await c.req.json()
+    );
+    return c.json({ expense });
   } catch (error: any) {
     if (error?.status) return c.json({ error: error.message }, error.status);
     throw error;
@@ -1379,35 +1820,14 @@ dataRoutes.patch('/events/:eventId/expenses/:expenseId', async (c) => {
 });
 
 dataRoutes.post('/events/:eventId/expenses/:expenseId/delete', async (c) => {
-  const eventId = c.req.param('eventId');
-  const expenseId = c.req.param('expenseId');
-  const actor = c.get('actor');
-  const body = await c.req.json();
-  const reason = String(body.reason || '').trim();
-  if (!reason) return c.json({ error: 'Please provide a reason for deleting this expense.' }, 400);
   try {
-    await withTransaction(async (sql) => {
-      const snap = await sql`
-        SELECT * FROM utsav_seva.expenses WHERE event_id = ${eventId} AND id = ${expenseId} LIMIT 1
-      `;
-      if (!snap[0]) return;
-      if (snap[0].deleted) throw httpError('This expense is already deleted.', 400);
-      const amount = num(snap[0].amount);
-      await sql`
-        UPDATE utsav_seva.expenses SET
-          deleted = TRUE, deleted_at = NOW(), deleted_by = ${actor.uid},
-          deleted_by_name = ${actor.displayName || 'Organizer'},
-          deletion_reason = ${reason}, updated_at = NOW()
-        WHERE id = ${expenseId}
-      `;
-      if (amount) {
-        await sql`
-          UPDATE utsav_seva.events
-          SET total_expenses = total_expenses - ${amount}, updated_at = NOW()
-          WHERE id = ${eventId}
-        `;
-      }
-    });
+    const body = await c.req.json();
+    await deleteExpenseRecord(
+      c.get('actor'),
+      c.req.param('eventId'),
+      c.req.param('expenseId'),
+      String(body.reason || '').trim()
+    );
     return c.json({ success: true });
   } catch (error: any) {
     if (error?.status) return c.json({ error: error.message }, error.status);
@@ -1441,15 +1861,46 @@ dataRoutes.post('/events/:eventId/donations', async (c) => {
 });
 
 dataRoutes.patch('/events/:eventId/donations/:donationId', async (c) => {
-  return patchDonation(c, 'festival');
+  try {
+    const donation = await patchDonationRecord(
+      c.get('actor'),
+      c.req.param('eventId'),
+      c.req.param('donationId'),
+      await c.req.json(),
+      'festival'
+    );
+    return c.json({ donation });
+  } catch (error: any) {
+    if (error?.status) return c.json({ error: error.message }, error.status);
+    throw error;
+  }
 });
 
 dataRoutes.post('/events/:eventId/donations/:donationId/like', async (c) => {
-  return toggleLike(c, 'festival');
+  try {
+    const donation = await toggleLikeRecord(c.get('actor'), c.req.param('donationId'), 'festival');
+    return c.json({ donation });
+  } catch (error: any) {
+    if (error?.status) return c.json({ error: error.message }, error.status);
+    throw error;
+  }
 });
 
 dataRoutes.post('/events/:eventId/donations/:donationId/delete', async (c) => {
-  return softDeleteDonation(c, 'festival');
+  try {
+    const body = await c.req.json();
+    await softDeleteDonationRecord(
+      c.get('actor'),
+      c.req.param('eventId'),
+      c.req.param('donationId'),
+      String(body.reason || '').trim(),
+      'festival'
+    );
+    return c.json({ success: true });
+  } catch (error: any) {
+    if (error?.status) return c.json({ error: error.message }, error.status);
+    throw error;
+  }
 });
 
 dataRoutes.get('/events/:eventId/street-donations', async (c) => {
@@ -1476,15 +1927,46 @@ dataRoutes.post('/events/:eventId/street-donations', async (c) => {
 });
 
 dataRoutes.patch('/events/:eventId/street-donations/:donationId', async (c) => {
-  return patchDonation(c, 'street');
+  try {
+    const donation = await patchDonationRecord(
+      c.get('actor'),
+      c.req.param('eventId'),
+      c.req.param('donationId'),
+      await c.req.json(),
+      'street'
+    );
+    return c.json({ donation });
+  } catch (error: any) {
+    if (error?.status) return c.json({ error: error.message }, error.status);
+    throw error;
+  }
 });
 
 dataRoutes.post('/events/:eventId/street-donations/:donationId/like', async (c) => {
-  return toggleLike(c, 'street');
+  try {
+    const donation = await toggleLikeRecord(c.get('actor'), c.req.param('donationId'), 'street');
+    return c.json({ donation });
+  } catch (error: any) {
+    if (error?.status) return c.json({ error: error.message }, error.status);
+    throw error;
+  }
 });
 
 dataRoutes.post('/events/:eventId/street-donations/:donationId/delete', async (c) => {
-  return softDeleteDonation(c, 'street');
+  try {
+    const body = await c.req.json();
+    await softDeleteDonationRecord(
+      c.get('actor'),
+      c.req.param('eventId'),
+      c.req.param('donationId'),
+      String(body.reason || '').trim(),
+      'street'
+    );
+    return c.json({ success: true });
+  } catch (error: any) {
+    if (error?.status) return c.json({ error: error.message }, error.status);
+    throw error;
+  }
 });
 
 async function patchDonation(c: any, kind: 'festival' | 'street') {
