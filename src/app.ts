@@ -17,7 +17,7 @@ import {
   resolveKind,
 } from './lib/schemas.js';
 import { byteaToBuffer, MediaRow, publicFileUrl, toMediaDto } from './lib/types.js';
-import { dataRoutes } from './routes/data.js';
+import { dataRoutes, handleMeGet, handleMePatch, handleMePut, handleRecordsPost, handleSyncPhoto } from './routes/data.js';
 
 const app = new Hono().basePath('/api');
 
@@ -901,6 +901,12 @@ app.post('/auth/verify-registration-otp', async (c) => {
     return c.json({ error: error?.message || 'Failed to verify OTP' }, 500);
   }
 });
+
+app.get('/me', handleMeGet);
+app.patch('/me', handleMePatch);
+app.put('/me', handleMePut);
+app.post('/sync-photo', handleSyncPhoto);
+app.post('/records', handleRecordsPost);
 
 app.route('/', dataRoutes);
 

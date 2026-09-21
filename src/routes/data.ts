@@ -57,6 +57,124 @@ dataRoutes.use('*', async (c, next) => {
   }
 });
 
+async function actorFromRequest(c: any): Promise<Actor> {
+  try {
+    const existing = c.get('actor') as Actor | undefined;
+    if (existing?.uid) return existing;
+  } catch {
+    // route is mounted on the root app, not dataRoutes
+  }
+  const tokenUser = await verifyFirebaseToken(c.req.header('Authorization'));
+  const actor = await loadActor(getDb(), tokenUser.uid, tokenUser.email);
+  if (actor.removed) throw httpError('Account is disabled', 403);
+  return actor;
+}
+
+export async function handleMeGet(c: any) {
+  try {
+    const actor = await actorFromRequest(c);
+    const rows = await getDb()`SELECT * FROM utsav_seva.users WHERE uid = ${actor.uid} LIMIT 1`;
+    if (!rows[0]) {
+      return c.json({
+        user: {
+          uid: actor.uid,
+          displayName: actor.displayName,
+          email: actor.email,
+          role: actor.role,
+          removed: false,
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        },
+      });
+    }
+    return c.json({ user: toUser({ ...rows[0], role: actor.role }) });
+  } catch (error: any) {
+    return c.json({ error: error?.message || 'Sign in required' }, error?.status || 401);
+  }
+}
+
+export async function handleMePatch(c: any) {
+  try {
+    const actor = await actorFromRequest(c);
+    const user = await patchUserRow(getDb(), actor, actor.uid, await c.req.json());
+    return c.json({ user });
+  } catch (error: any) {
+    return c.json({ error: error?.message || 'Request failed' }, error?.status || 400);
+  }
+}
+
+export async function handleMePut(c: any) {
+  try {
+    const actor = await actorFromRequest(c);
+    const user = await upsertUserRow(getDb(), actor, actor.uid, await c.req.json());
+    return c.json({ user });
+  } catch (error: any) {
+    return c.json({ error: error?.message || 'Request failed' }, error?.status || 400);
+  }
+}
+
+export async function handleSyncPhoto(c: any) {
+  try {
+    const actor = await actorFromRequest(c);
+    const body = await c.req.json();
+    await syncUserPhoto(getDb(), actor, String(body.uid || actor.uid).trim(), String(body.photoURL || '').trim());
+    return c.json({ success: true });
+  } catch (error: any) {
+    return c.json({ error: error?.message || 'Request failed' }, error?.status || 400);
+  }
+}
+
+export async function handleRecordsPost(c: any) {
+  try {
+    const actor = await actorFromRequest(c);
+    const body = await c.req.json();
+    const type = String(body.type || c.req.query('type') || '').trim();
+    const action = String(body.action || 'create').trim();
+    const sql = getDb();
+    const eventId = body.eventId ? await resolveEventId(sql, String(body.eventId)) : '';
+
+    if (type === 'user' && (action === 'patch' || action === 'update')) {
+      const uid = String(body.uid || actor.uid).trim();
+      return c.json({ user: await patchUserRow(sql, actor, uid, body) });
+    }
+    if (type === 'user' && (action === 'upsert' || action === 'create')) {
+      const uid = String(body.uid || actor.uid).trim();
+      return c.json({ user: await upsertUserRow(sql, actor, uid, body) });
+    }
+    if (type === 'sync-photo') {
+      await syncUserPhoto(sql, actor, String(body.uid || actor.uid).trim(), String(body.photoURL || '').trim());
+      return c.json({ success: true });
+    }
+    if (type === 'expense' && action === 'create') {
+      if (!eventId) return c.json({ error: 'eventId is required' }, 400);
+      return c.json({ expense: await createExpenseRecord(actor, eventId, body) });
+    }
+    if ((type === 'donation' || type === 'donations') && action === 'create') {
+      if (!eventId) return c.json({ error: 'eventId is required' }, 400);
+      return c.json({ donation: await createDonationRecord(actor, eventId, body, 'festival') });
+    }
+    if ((type === 'street-donation' || type === 'street-donations') && action === 'create') {
+      if (!eventId) return c.json({ error: 'eventId is required' }, 400);
+      return c.json({ donation: await createDonationRecord(actor, eventId, body, 'street') });
+    }
+    if (type === 'street' && action === 'create') {
+      return c.json({ street: await createStreetRecord(actor, body) });
+    }
+    if (type === 'event' && action === 'create') {
+      const created = await createEventRecord(actor, body);
+      return c.json({ success: true, ...created });
+    }
+    if ((type === 'sub-event' || type === 'sub-events') && action === 'create') {
+      if (!eventId) return c.json({ error: 'eventId is required' }, 400);
+      return c.json({ subEvent: await createSubEventRecord(actor, eventId, body) });
+    }
+    return c.json({ error: 'Unknown record type or action' }, 400);
+  } catch (error: any) {
+    if (error?.status) return c.json({ error: error.message }, error.status);
+    return c.json({ error: error?.message || 'Request failed' }, 400);
+  }
+}
+
 dataRoutes.onError((err, c) => {
   const status = Number((err as any).status) || 500;
   return c.json({ error: err.message || 'Request failed' }, status as 400);
@@ -439,24 +557,7 @@ dataRoutes.get('/users', async (c) => {
   return c.json({ users: rows.map(toUser) });
 });
 
-dataRoutes.get('/me', async (c) => {
-  const actor = c.get('actor');
-  const rows = await getDb()`SELECT * FROM utsav_seva.users WHERE uid = ${actor.uid} LIMIT 1`;
-  if (!rows[0]) {
-    return c.json({
-      user: {
-        uid: actor.uid,
-        displayName: actor.displayName,
-        email: actor.email,
-        role: actor.role,
-        removed: false,
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
-      },
-    });
-  }
-  return c.json({ user: toUser({ ...rows[0], role: actor.role }) });
-});
+dataRoutes.get('/me', handleMeGet);
 
 dataRoutes.get('/user', async (c) => {
   const actor = c.get('actor');
@@ -484,17 +585,9 @@ dataRoutes.get('/users/by-email', async (c) => {
   return c.json({ exists: true, uid: user.uid, displayName: user.displayName, email: user.email });
 });
 
-dataRoutes.patch('/me', async (c) => {
-  const actor = c.get('actor');
-  const user = await patchUserRow(getDb(), actor, actor.uid, await c.req.json());
-  return c.json({ user });
-});
+dataRoutes.patch('/me', handleMePatch);
 
-dataRoutes.put('/me', async (c) => {
-  const actor = c.get('actor');
-  const user = await upsertUserRow(getDb(), actor, actor.uid, await c.req.json());
-  return c.json({ user });
-});
+dataRoutes.put('/me', handleMePut);
 
 dataRoutes.put('/user', async (c) => {
   const actor = c.get('actor');
@@ -512,13 +605,7 @@ dataRoutes.patch('/user', async (c) => {
   return c.json({ user });
 });
 
-dataRoutes.post('/sync-photo', async (c) => {
-  const actor = c.get('actor');
-  const body = await c.req.json();
-  const uid = String(body.uid || actor.uid).trim();
-  await syncUserPhoto(getDb(), actor, uid, String(body.photoURL || '').trim());
-  return c.json({ success: true });
-});
+dataRoutes.post('/sync-photo', handleSyncPhoto);
 
 dataRoutes.post('/remove-user', async (c) => {
   requireSuper(c.get('actor'));
@@ -829,56 +916,7 @@ dataRoutes.get('/records', async (c) => {
   return c.json({ error: 'Unknown type' }, 400);
 });
 
-dataRoutes.post('/records', async (c) => {
-  try {
-  const actor = c.get('actor');
-  const body = await c.req.json();
-  const type = String(body.type || c.req.query('type') || '').trim();
-  const action = String(body.action || 'create').trim();
-  const sql = getDb();
-  const eventId = body.eventId ? await resolveEventId(sql, String(body.eventId)) : '';
-
-  if (type === 'user' && (action === 'patch' || action === 'update')) {
-    const uid = String(body.uid || actor.uid).trim();
-    return c.json({ user: await patchUserRow(sql, actor, uid, body) });
-  }
-  if (type === 'user' && (action === 'upsert' || action === 'create')) {
-    const uid = String(body.uid || actor.uid).trim();
-    return c.json({ user: await upsertUserRow(sql, actor, uid, body) });
-  }
-  if (type === 'sync-photo') {
-    await syncUserPhoto(sql, actor, String(body.uid || actor.uid).trim(), String(body.photoURL || '').trim());
-    return c.json({ success: true });
-  }
-  if (type === 'expense' && action === 'create') {
-    if (!eventId) return c.json({ error: 'eventId is required' }, 400);
-    return c.json({ expense: await createExpenseRecord(actor, eventId, body) });
-  }
-  if ((type === 'donation' || type === 'donations') && action === 'create') {
-    if (!eventId) return c.json({ error: 'eventId is required' }, 400);
-    return c.json({ donation: await createDonationRecord(actor, eventId, body, 'festival') });
-  }
-  if ((type === 'street-donation' || type === 'street-donations') && action === 'create') {
-    if (!eventId) return c.json({ error: 'eventId is required' }, 400);
-    return c.json({ donation: await createDonationRecord(actor, eventId, body, 'street') });
-  }
-  if (type === 'street' && action === 'create') {
-    return c.json({ street: await createStreetRecord(actor, body) });
-  }
-  if (type === 'event' && action === 'create') {
-    const created = await createEventRecord(actor, body);
-    return c.json({ success: true, ...created });
-  }
-  if ((type === 'sub-event' || type === 'sub-events') && action === 'create') {
-    if (!eventId) return c.json({ error: 'eventId is required' }, 400);
-    return c.json({ subEvent: await createSubEventRecord(actor, eventId, body) });
-  }
-  return c.json({ error: 'Unknown record type or action' }, 400);
-  } catch (error: any) {
-    if (error?.status) return c.json({ error: error.message }, error.status);
-    throw error;
-  }
-});
+dataRoutes.post('/records', handleRecordsPost);
 
 dataRoutes.get('/events/:eventId', async (c) => {
   const sql = getDb();
