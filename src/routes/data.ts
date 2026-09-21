@@ -79,6 +79,94 @@ function canManageEvent(actor: Actor, event: any) {
   return ids.includes(actor.uid);
 }
 
+const PLACEHOLDER_EVENT_IDS = new Set([
+  'create',
+  'donations',
+  'street-donations',
+  'expenses',
+  'gallery',
+  'sub-events',
+  'sub-event',
+  'organizers',
+  'members',
+  'undefined',
+  'null',
+  'mine',
+]);
+
+async function resolveEventId(sql: Sql, requested: string): Promise<string> {
+  const id = String(requested || '').trim();
+  if (id && !PLACEHOLDER_EVENT_IDS.has(id)) {
+    const rows = await sql`SELECT id FROM utsav_seva.events WHERE id = ${id} LIMIT 1`;
+    if (rows[0]) return String(rows[0].id);
+  }
+  const all = await sql`SELECT id FROM utsav_seva.events ORDER BY created_at DESC`;
+  if (all.length === 1) return String(all[0].id);
+  if (id && !PLACEHOLDER_EVENT_IDS.has(id)) throw httpError('Not found', 404);
+  if (all[0]) return String(all[0].id);
+  throw httpError('Not found', 404);
+}
+
+async function attachCollections(sql: Sql, events: any[]) {
+  for (const event of events) {
+    const eventId = String(event.id);
+    try {
+      const [donations, streetDonations, expenses, members] = await Promise.all([
+        sql`
+          SELECT d.*,
+            COALESCE(
+              (SELECT ARRAY_AGG(l.user_id) FROM utsav_seva.donation_likes l WHERE l.donation_id = d.id),
+              ARRAY[]::text[]
+            ) AS liked_by
+          FROM utsav_seva.donations d
+          WHERE d.event_id = ${eventId}
+          ORDER BY d.created_at DESC
+        `,
+        sql`
+          SELECT d.*,
+            COALESCE(
+              (SELECT ARRAY_AGG(l.user_id) FROM utsav_seva.street_donation_likes l WHERE l.donation_id = d.id),
+              ARRAY[]::text[]
+            ) AS liked_by
+          FROM utsav_seva.street_donations d
+          WHERE d.event_id = ${eventId}
+          ORDER BY d.created_at DESC
+        `,
+        sql`SELECT * FROM utsav_seva.expenses WHERE event_id = ${eventId} ORDER BY created_at DESC`,
+        sql`
+          SELECT m.*, u.display_name AS user_display_name, u.photo_url AS user_photo_url
+          FROM utsav_seva.event_members m
+          LEFT JOIN utsav_seva.users u ON u.uid = m.user_id
+          WHERE m.event_id = ${eventId}
+        `,
+      ]);
+      event.donations = donations.map(toDonation);
+      event.streetDonations = streetDonations.map(toDonation);
+      event.expenses = expenses.map(toExpense);
+      event.members = members.map((row: any) =>
+        toMember({
+          ...row,
+          display_name: row.user_display_name || row.display_name,
+          photo_url: row.user_photo_url || row.photo_url,
+        })
+      );
+      console.log(
+        'attachCollections',
+        eventId,
+        'donations',
+        event.donations.length,
+        'expenses',
+        event.expenses.length,
+        'members',
+        event.members.length
+      );
+    } catch (error) {
+      console.error('attachCollections failed', eventId, error);
+    }
+  }
+  return events;
+}
+
 // ── users ──────────────────────────────────────────────────────────────────
 
 dataRoutes.get('/users', async (c) => {
@@ -369,7 +457,8 @@ dataRoutes.get('/events', async (c) => {
   if (streetId) rows = rows.filter((r) => r.street_id === streetId);
   if (festivalName) rows = rows.filter((r) => r.festival_name === festivalName);
   if (year) rows = rows.filter((r) => Number(r.year) === Number(year));
-  return c.json({ events: rows.map(toEvent) });
+  const events = await attachCollections(sql, rows.map(toEvent));
+  return c.json({ events });
 });
 
 dataRoutes.get('/events/mine', async (c) => {
@@ -387,13 +476,116 @@ dataRoutes.get('/events/mine', async (c) => {
              OR m.user_id = ${uid}
           ORDER BY e.created_at DESC
         `;
-  return c.json({ events: rows.map(toEvent) });
+  const events = await attachCollections(getDb(), rows.map(toEvent));
+  return c.json({ events });
+});
+
+dataRoutes.get('/records', async (c) => {
+  const sql = getDb();
+  const type = String(c.req.query('type') || 'event');
+  const eventId = await resolveEventId(sql, String(c.req.query('eventId') || ''));
+  if (type === 'event') {
+    const rows = await sql`SELECT * FROM utsav_seva.events WHERE id = ${eventId} LIMIT 1`;
+    if (!rows[0]) return c.json({ error: 'Not found' }, 404);
+    const [event] = await attachCollections(sql, [toEvent(rows[0])]);
+    return c.json({ event });
+  }
+  if (type === 'donations') {
+    const result = await sql`
+      SELECT d.*,
+        COALESCE(
+          (SELECT ARRAY_AGG(l.user_id) FROM utsav_seva.donation_likes l WHERE l.donation_id = d.id),
+          ARRAY[]::text[]
+        ) AS liked_by
+      FROM utsav_seva.donations d
+      WHERE d.event_id = ${eventId}
+      ORDER BY d.created_at DESC
+    `;
+    return c.json({ donations: result.map(toDonation) });
+  }
+  if (type === 'street-donations') {
+    const result = await sql`
+      SELECT d.*,
+        COALESCE(
+          (SELECT ARRAY_AGG(l.user_id) FROM utsav_seva.street_donation_likes l WHERE l.donation_id = d.id),
+          ARRAY[]::text[]
+        ) AS liked_by
+      FROM utsav_seva.street_donations d
+      WHERE d.event_id = ${eventId}
+      ORDER BY d.created_at DESC
+    `;
+    return c.json({ donations: result.map(toDonation) });
+  }
+  if (type === 'expenses') {
+    const result = await sql`
+      SELECT * FROM utsav_seva.expenses
+      WHERE event_id = ${eventId}
+      ORDER BY created_at DESC
+    `;
+    return c.json({ expenses: result.map(toExpense) });
+  }
+  if (type === 'members') {
+    const rows = await sql`
+      SELECT m.*, u.display_name AS user_display_name, u.photo_url AS user_photo_url
+      FROM utsav_seva.event_members m
+      LEFT JOIN utsav_seva.users u ON u.uid = m.user_id
+      WHERE m.event_id = ${eventId}
+    `;
+    return c.json({
+      members: rows.map((row: any) =>
+        toMember({
+          ...row,
+          display_name: row.user_display_name || row.display_name,
+          photo_url: row.user_photo_url || row.photo_url,
+        })
+      ),
+    });
+  }
+  if (type === 'join-requests') {
+    const status = c.req.query('status');
+    const uid = c.req.query('uid');
+    let rows: any[];
+    if (uid) {
+      rows = await sql`
+        SELECT * FROM utsav_seva.join_requests WHERE event_id = ${eventId} AND uid = ${uid}
+      `;
+    } else if (status) {
+      rows = await sql`
+        SELECT * FROM utsav_seva.join_requests
+        WHERE event_id = ${eventId} AND status = ${status}
+        ORDER BY requested_at DESC
+      `;
+    } else {
+      rows = await sql`
+        SELECT * FROM utsav_seva.join_requests WHERE event_id = ${eventId} ORDER BY requested_at DESC
+      `;
+    }
+    return c.json({ requests: rows.map(toJoinRequest) });
+  }
+  if (type === 'sub-events') {
+    const rows = await sql`
+      SELECT * FROM utsav_seva.sub_events WHERE event_id = ${eventId} ORDER BY date ASC
+    `;
+    return c.json({ subEvents: rows.map(toSubEvent) });
+  }
+  if (type === 'albums') {
+    const rows = await sql`
+      SELECT * FROM public.albums
+      WHERE event_id = ${eventId} AND deleted = FALSE
+      ORDER BY created_at DESC
+    `;
+    return c.json({ albums: rows.map(toAlbum) });
+  }
+  return c.json({ error: 'Unknown type' }, 400);
 });
 
 dataRoutes.get('/events/:eventId', async (c) => {
-  const rows = await getDb()`SELECT * FROM utsav_seva.events WHERE id = ${c.req.param('eventId')} LIMIT 1`;
+  const sql = getDb();
+  const eventId = await resolveEventId(sql, c.req.param('eventId'));
+  const rows = await sql`SELECT * FROM utsav_seva.events WHERE id = ${eventId} LIMIT 1`;
   if (!rows[0]) return c.json({ error: 'Not found' }, 404);
-  return c.json({ event: toEvent(rows[0]) });
+  const [event] = await attachCollections(sql, [toEvent(rows[0])]);
+  return c.json({ event });
 });
 
 dataRoutes.post('/events', async (c) => {
@@ -489,8 +681,8 @@ dataRoutes.delete('/events/:eventId', async (c) => {
 // ── members / join requests ────────────────────────────────────────────────
 
 dataRoutes.get('/events/:eventId/members', async (c) => {
-  const eventId = c.req.param('eventId');
   const sql = getDb();
+  const eventId = await resolveEventId(sql, c.req.param('eventId'));
   const rows = await sql`
     SELECT m.*, u.display_name AS user_display_name, u.photo_url AS user_photo_url
     FROM utsav_seva.event_members m
@@ -836,9 +1028,10 @@ dataRoutes.get('/events/:eventId/expenses', async (c) => {
   const category = c.req.query('category');
   const subEventId = c.req.query('subEventId');
   const sql = getDb();
+  const eventId = await resolveEventId(sql, c.req.param('eventId'));
   let rows = await sql`
     SELECT * FROM utsav_seva.expenses
-    WHERE event_id = ${c.req.param('eventId')}
+    WHERE event_id = ${eventId}
     ORDER BY created_at DESC
   `;
   if (category) rows = rows.filter((r: any) => r.category === category);
@@ -979,8 +1172,9 @@ dataRoutes.post('/events/:eventId/expenses/:expenseId/delete', async (c) => {
 // ── donations / street donations ───────────────────────────────────────────
 
 dataRoutes.get('/events/:eventId/donations', async (c) => {
-  const eventId = c.req.param('eventId');
-  const result = await getDb()`
+  const sql = getDb();
+  const eventId = await resolveEventId(sql, c.req.param('eventId'));
+  const result = await sql`
     SELECT d.*,
       COALESCE(
         (SELECT ARRAY_AGG(l.user_id) FROM utsav_seva.donation_likes l WHERE l.donation_id = d.id),
@@ -1041,8 +1235,9 @@ dataRoutes.post('/events/:eventId/donations/:donationId/delete', async (c) => {
 });
 
 dataRoutes.get('/events/:eventId/street-donations', async (c) => {
-  const eventId = c.req.param('eventId');
-  const result = await getDb()`
+  const sql = getDb();
+  const eventId = await resolveEventId(sql, c.req.param('eventId'));
+  const result = await sql`
     SELECT d.*,
       COALESCE(
         (SELECT ARRAY_AGG(l.user_id) FROM utsav_seva.street_donation_likes l WHERE l.donation_id = d.id),

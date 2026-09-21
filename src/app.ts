@@ -30,19 +30,156 @@ app.use('*', async (c, next) => {
   Object.entries(headers).forEach(([key, value]) => c.header(key, value));
 });
 
+app.get('/event-data', async (c) => {
+  try {
+    const { verifyFirebaseToken } = await import('./lib/firebaseAuth.js');
+    const {
+      toDonation,
+      toEvent,
+      toExpense,
+      toMember,
+    } = await import('./lib/mappers.js');
+    await verifyFirebaseToken(c.req.header('Authorization'));
+    const sql = getDb();
+    const type = String(c.req.query('type') || 'donations');
+    let eventId = String(c.req.query('eventId') || '').trim();
+    if (!eventId) {
+      const events = await sql`SELECT id FROM utsav_seva.events ORDER BY created_at DESC LIMIT 1`;
+      eventId = String(events[0]?.id || '');
+    }
+    if (!eventId) return c.json({ error: 'Not found' }, 404);
+
+    if (type === 'event') {
+      const rows = await sql`SELECT * FROM utsav_seva.events WHERE id = ${eventId} LIMIT 1`;
+      if (!rows[0]) return c.json({ error: 'Not found' }, 404);
+      return c.json({ event: toEvent(rows[0]) });
+    }
+    if (type === 'donations') {
+      const rows = await sql`
+        SELECT d.*,
+          COALESCE(
+            (SELECT ARRAY_AGG(l.user_id) FROM utsav_seva.donation_likes l WHERE l.donation_id = d.id),
+            ARRAY[]::text[]
+          ) AS liked_by
+        FROM utsav_seva.donations d
+        WHERE d.event_id = ${eventId}
+        ORDER BY d.created_at DESC
+      `;
+      return c.json({ donations: rows.map(toDonation) });
+    }
+    if (type === 'street-donations') {
+      const rows = await sql`
+        SELECT d.*,
+          COALESCE(
+            (SELECT ARRAY_AGG(l.user_id) FROM utsav_seva.street_donation_likes l WHERE l.donation_id = d.id),
+            ARRAY[]::text[]
+          ) AS liked_by
+        FROM utsav_seva.street_donations d
+        WHERE d.event_id = ${eventId}
+        ORDER BY d.created_at DESC
+      `;
+      return c.json({ donations: rows.map(toDonation) });
+    }
+    if (type === 'expenses') {
+      const rows = await sql`
+        SELECT * FROM utsav_seva.expenses WHERE event_id = ${eventId} ORDER BY created_at DESC
+      `;
+      return c.json({ expenses: rows.map(toExpense) });
+    }
+    if (type === 'members') {
+      const rows = await sql`
+        SELECT m.*, u.display_name AS user_display_name, u.photo_url AS user_photo_url
+        FROM utsav_seva.event_members m
+        LEFT JOIN utsav_seva.users u ON u.uid = m.user_id
+        WHERE m.event_id = ${eventId}
+      `;
+      return c.json({
+        members: rows.map((row: any) =>
+          toMember({
+            ...row,
+            display_name: row.user_display_name || row.display_name,
+            photo_url: row.user_photo_url || row.photo_url,
+          })
+        ),
+      });
+    }
+    if (type === 'join-requests') {
+      const { toJoinRequest } = await import('./lib/mappers.js');
+      const status = c.req.query('status');
+      const uid = c.req.query('uid');
+      let rows: any[];
+      if (uid) {
+        rows = await sql`
+          SELECT * FROM utsav_seva.join_requests WHERE event_id = ${eventId} AND uid = ${uid}
+        `;
+      } else if (status) {
+        rows = await sql`
+          SELECT * FROM utsav_seva.join_requests
+          WHERE event_id = ${eventId} AND status = ${status}
+          ORDER BY requested_at DESC
+        `;
+      } else {
+        rows = await sql`
+          SELECT * FROM utsav_seva.join_requests WHERE event_id = ${eventId} ORDER BY requested_at DESC
+        `;
+      }
+      return c.json({ requests: rows.map(toJoinRequest) });
+    }
+    if (type === 'sub-events') {
+      const { toSubEvent } = await import('./lib/mappers.js');
+      const rows = await sql`
+        SELECT * FROM utsav_seva.sub_events WHERE event_id = ${eventId} ORDER BY date ASC
+      `;
+      return c.json({ subEvents: rows.map(toSubEvent) });
+    }
+    if (type === 'albums') {
+      const { toAlbum } = await import('./lib/mappers.js');
+      const rows = await sql`
+        SELECT * FROM public.albums
+        WHERE event_id = ${eventId} AND deleted = FALSE
+        ORDER BY created_at DESC
+      `;
+      return c.json({ albums: rows.map(toAlbum) });
+    }
+    return c.json({ error: 'Unknown type' }, 400);
+  } catch (error: any) {
+    const status = Number(error?.status) === 401 ? 401 : 500;
+    return c.json({ error: error?.message || 'Request failed' }, status as 401);
+  }
+});
+
 app.get('/health', async (c) => {
   let appTables = false;
+  let donationCount = 0;
+  let expenseCount = 0;
+  let memberCount = 0;
   try {
     const rows = await getDb()`SELECT to_regclass('utsav_seva.events') AS rel`;
     appTables = !!rows[0]?.rel;
   } catch {
     appTables = false;
   }
+  try {
+    const counts = await getDb()`
+      SELECT
+        (SELECT COUNT(*)::int FROM utsav_seva.donations) AS donations,
+        (SELECT COUNT(*)::int FROM utsav_seva.expenses) AS expenses,
+        (SELECT COUNT(*)::int FROM utsav_seva.event_members) AS members
+    `;
+    donationCount = Number(counts[0]?.donations || 0);
+    expenseCount = Number(counts[0]?.expenses || 0);
+    memberCount = Number(counts[0]?.members || 0);
+  } catch {
+    // ignore
+  }
   return c.json({
     ok: true,
     service: 'festive-events-api',
     storage: 'postgres-bytea',
     appTables,
+    donationCount,
+    expenseCount,
+    memberCount,
     time: new Date().toISOString(),
   });
 });
